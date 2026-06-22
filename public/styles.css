@@ -1,0 +1,413 @@
+:root {
+  --bg: #f7f8fb;
+  --panel: #ffffff;
+  --ink: #1f2937;
+  --muted: #667085;
+  --line: #d9dee8;
+  --accent: #0f766e;
+  --accent-dark: #115e59;
+  --danger: #b42318;
+  --warn: #b54708;
+  --ok: #067647;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+.shell {
+  width: min(1360px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: 24px 0 40px;
+}
+
+.topbar,
+.panelHeader,
+.formActions,
+.itemActions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 28px;
+}
+
+h2 {
+  font-size: 18px;
+}
+
+p,
+label,
+.muted {
+  color: var(--muted);
+}
+
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin: 20px 0;
+}
+
+.metrics article,
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.metrics article {
+  padding: 16px;
+}
+
+.metrics span {
+  display: block;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.metrics strong {
+  display: block;
+  margin-top: 8px;
+  font-size: 26px;
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr);
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.mentorGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(280px, 0.8fr);
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.panel {
+  padding: 16px;
+}
+
+.panelHeader {
+  margin-bottom: 14px;
+}
+
+.form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+label {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+}
+
+input,
+select,
+textarea {
+  min-height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  color: var(--ink);
+  background: #ffffff;
+  font: inherit;
+}
+
+textarea {
+  resize: vertical;
+}
+
+.stackForm {
+  display: grid;
+  gap: 12px;
+}
+
+.checkboxLine {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.checkboxLine input {
+  min-height: auto;
+}
+
+.formActions {
+  grid-column: 1 / -1;
+  justify-content: flex-start;
+}
+
+.button {
+  min-height: 36px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 8px 12px;
+  background: var(--accent);
+  color: #ffffff;
+  cursor: pointer;
+  font: inherit;
+}
+
+.button:hover {
+  background: var(--accent-dark);
+}
+
+.button.secondary {
+  background: #ffffff;
+  color: var(--ink);
+  border-color: var(--line);
+}
+
+.button.danger {
+  background: #ffffff;
+  color: var(--danger);
+  border-color: #f1c6c2;
+}
+
+.list,
+.compactList {
+  display: grid;
+  gap: 10px;
+}
+
+.list {
+  margin-top: 14px;
+}
+
+.item {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: #ffffff;
+}
+
+.item h3 {
+  margin: 0 0 6px;
+  font-size: 16px;
+}
+
+.itemMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  border-radius: 999px;
+  padding: 2px 8px;
+  background: #eef4ff;
+  color: #175cd3;
+  font-size: 12px;
+}
+
+.badge.success,
+.badge.active {
+  background: #ecfdf3;
+  color: var(--ok);
+}
+
+.badge.failed,
+.badge.error {
+  background: #fef3f2;
+  color: var(--danger);
+}
+
+.badge.paused {
+  background: #fffaeb;
+  color: var(--warn);
+}
+
+.resultsLayout {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.8fr) minmax(0, 1.2fr);
+  gap: 16px;
+}
+
+.detailBox {
+  min-height: 360px;
+  max-height: 620px;
+  overflow: auto;
+  margin: 14px 0 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.detailGrid {
+  display: grid;
+  gap: 12px;
+}
+
+.detailCard {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: #ffffff;
+}
+
+.detailCard h3 {
+  margin: 0 0 8px;
+  font-size: 15px;
+}
+
+.kvGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.kv {
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid #edf0f5;
+  border-radius: 6px;
+}
+
+.kv span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.kv strong {
+  overflow-wrap: anywhere;
+}
+
+.analysisText {
+  display: grid;
+  gap: 10px;
+  line-height: 1.45;
+}
+
+.analysisText p {
+  color: var(--ink);
+}
+
+.postBlock {
+  display: grid;
+  gap: 8px;
+  padding: 10px 0;
+  border-top: 1px solid #edf0f5;
+}
+
+.postBlock:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.postBlock p {
+  color: var(--ink);
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.commentList {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid #edf0f5;
+  border-radius: 6px;
+  background: #f9fafb;
+}
+
+.commentList > strong {
+  font-size: 13px;
+}
+
+.commentBlock {
+  display: grid;
+  gap: 4px;
+  padding-top: 8px;
+  border-top: 1px solid #e5e7eb;
+}
+
+.commentBlock:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.commentBlock span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.commentBlock p {
+  margin: 0;
+  font-size: 13px;
+}
+
+.rawBlock {
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  padding: 10px;
+  background: #111827;
+  color: #f9fafb;
+  border-radius: 6px;
+  font-family: Consolas, Monaco, monospace;
+  font-size: 12px;
+}
+
+details summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.statusLine {
+  min-height: 22px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+@media (max-width: 860px) {
+  .metrics,
+  .workspace,
+  .mentorGrid,
+  .resultsLayout,
+  .form,
+  .kvGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .topbar,
+  .panelHeader,
+  .itemActions {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

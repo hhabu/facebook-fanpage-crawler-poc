@@ -1,0 +1,31 @@
+{
+  "name": "multi-bot-scraping-analysis-tool",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MVP multi-bot scraping and analysis tool with SQLite storage.",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/server.js",
+    "build": "tsc",
+    "setup": "tsx src/setup.ts",
+    "smoke": "tsx src/smokeTest.ts",
+    "profile:open": "tsx src/openProfile.ts",
+    "seed": "tsx src/seed.ts",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "cloakbrowser": "^0.3.31",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "playwright-core": "^1.61.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
