@@ -13,6 +13,8 @@ import type {
   SocialSnapshot
 } from "../lib/scraperTypes";
 
+const POST_CONTENT_UNAVAILABLE = "(post content unavailable)";
+
 interface CrawlResultRow {
   id: number;
   bot_id: number;
@@ -455,12 +457,13 @@ export function saveSocialPosts(
   );
 
   for (const post of posts) {
+    const sanitizedContent = post.content?.replace(/\s+/g, " ").trim() || POST_CONTENT_UNAVAILABLE;
     const result = insertPost.run(
       crawlResultId,
       post.postUrl,
       post.postId,
       post.author,
-      post.content,
+      sanitizedContent,
       post.publishedAt,
       post.reactionCount,
       post.likeCount,

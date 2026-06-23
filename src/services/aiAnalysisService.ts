@@ -38,6 +38,18 @@ function parseCommentJson(commentsJson: string | null | undefined): Array<{ text
   }
 }
 
+function usablePostText(post: { text?: string; content?: string }): string {
+  const content = post.content?.replace(/\s+/g, " ").trim();
+  if (content === "(post content unavailable)" || content?.startsWith("[facebook-crawler")) {
+    return "";
+  }
+  const text = (content || post.text || "").replace(/\s+/g, " ").trim();
+  if (!text || text === "(post content unavailable)" || text.startsWith("[facebook-crawler")) {
+    return "";
+  }
+  return text;
+}
+
 export function analyzeScrapeResult(bot: Bot, data: ScraperOutput): AnalysisResult {
   if (isArticle(data)) {
     const firstSentence = data.content.split(/[.!?]/).find(Boolean)?.trim() || data.title;
@@ -78,8 +90,8 @@ export function analyzeScrapeResult(bot: Bot, data: ScraperOutput): AnalysisResu
   if (isSocial(data)) {
     const posts = parsePostJson(data.postsJson);
     const commentSamples = parseCommentJson(data.commentsJson);
-    const firstPost = posts.find((post) => post.text || post.content);
-    const firstPostText = (firstPost?.text || firstPost?.content || "").replace(/\s+/g, " ").trim();
+    const firstPost = posts.find((post) => usablePostText(post));
+    const firstPostText = firstPost ? usablePostText(firstPost) : "";
     const firstComment = commentSamples.find((comment) => comment.text)?.text?.replace(/\s+/g, " ").trim();
     return {
       summary: firstPostText

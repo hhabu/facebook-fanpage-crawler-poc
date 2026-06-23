@@ -59,6 +59,14 @@ function truncateText(value, max = 280) {
   return text.length > max ? `${text.slice(0, max)}...` : text;
 }
 
+function postDisplayContent(post) {
+  const content = typeof post.content === "string" ? post.content.replace(/\s+/g, " ").trim() : null;
+  if (content) {
+    return content;
+  }
+  return post.text;
+}
+
 function formatValue(value) {
   if (value === null || value === undefined || value === "") {
     return "-";
@@ -151,7 +159,7 @@ function renderSnapshotCard(detail) {
                         ${post.commentCount ? `<span>Comments: ${escapeHtml(post.commentCount)}</span>` : ""}
                         ${post.shareCount ? `<span>Shares: ${escapeHtml(post.shareCount)}</span>` : ""}
                       </div>
-                      <p>${escapeHtml(truncateText(post.content || post.text, 1200))}</p>
+                      <p>${escapeHtml(truncateText(postDisplayContent(post), 1200))}</p>
                       ${
                         Array.isArray(post.comments) && post.comments.length
                           ? `<div class="commentList">

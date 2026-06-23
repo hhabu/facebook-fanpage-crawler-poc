@@ -72,7 +72,7 @@ async function runAttempt(bot: Bot, job: BotJob, attempt: number): Promise<numbe
 
   if (isFacebookTarget(bot)) {
     addJobLog(job.id, "facebook_page", "started", "collect post URLs and crawl post details");
-    const facebook = await crawlFacebookPage(bot, 5);
+    const facebook = await crawlFacebookPage(bot, 1);
     addJobLog(job.id, "facebook_page", "success", `posts=${facebook.socialPosts.length}`);
 
     addJobLog(job.id, "analyze", "started");
