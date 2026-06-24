@@ -70,6 +70,9 @@ interface ReelCommentPanelOpenResult {
   clicked: string | null;
   coordinateClick: string | null;
   panelText: string;
+  panelSelected: string | null;
+  panelCandidates: string[];
+  complementaryDebug: string[];
 }
 
 function screenshotPath(bot: Bot): string {
@@ -2067,7 +2070,116 @@ async function openReelCommentsPanel(page: Page, viewerText: string, commentCoun
   let clicked: string | null = null;
   const coordinateClick = "disabled";
   let panelText = "";
+  let panelSelected: string | null = null;
+  let panelCandidates: string[] = [];
+  const complementaryDebug: string[] = [];
   const beforeLength = normalizeText(viewerText).length;
+
+  async function appendComplementaryDebug(suffix = ""): Promise<void> {
+    const locator = page.locator('[role="complementary"]');
+    const count = await locator.count().catch(() => 0);
+    complementaryDebug.push(`[facebook-reel-complementary-count${suffix}=${count}]`);
+    for (let index = 0; index < Math.min(count, 6); index += 1) {
+      const item = locator.nth(index);
+      const text = await item.innerText({ timeout: 1200 }).catch(() => "");
+      const role = await item.getAttribute("role", { timeout: 1200 }).catch(() => "");
+      complementaryDebug.push(`[facebook-reel-complementary-${index}${suffix}=${normalizeText(text).length}:${role ?? ""}:${compactDebugText(text, 200)}]`);
+    }
+  }
+
+  async function selectedComplementaryText(): Promise<string> {
+    const texts = await page.locator('[role="complementary"]').allInnerTexts().catch(() => []);
+    const candidates = texts
+      .map((text) => normalizeText(text))
+      .filter((text) => text.length > 100)
+      .filter((text) => /(Phù hợp nhất|Bình luận)/i.test(text) && /(Thích|Trả lời)/i.test(text))
+      .sort((a, b) => a.length - b.length);
+    if (!candidates.length) {
+      return "";
+    }
+    panelSelected = `complementary:${candidates[0].length}`;
+    panelCandidates = [`complementary:${candidates[0].length}`];
+    return candidates[0];
+  }
+
+  async function collectPanelText(): Promise<string> {
+    const complementaryText = await selectedComplementaryText();
+    if (complementaryText) {
+      return complementaryText;
+    }
+
+    const result = await page
+      .evaluate((initialLength) => {
+        const visible = (element: Element | null): element is HTMLElement => {
+          if (!(element instanceof HTMLElement)) {
+            return false;
+          }
+          const rect = element.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        };
+        const fold = (value: string) =>
+          value
+            .normalize("NFD")
+            .replace(/[\u0300-\u036f]/g, "")
+            .toLowerCase();
+        const hasPanelHeading = (value: string) => {
+          const folded = fold(value);
+          return folded.includes("phu hop nhat") || folded.includes("binh luan") || /most relevant|comment/i.test(value);
+        };
+        const hasCommentAction = (value: string) => {
+          const folded = fold(value);
+          return folded.includes("thich") || folded.includes("tra loi") || /like|reply/i.test(value);
+        };
+        const marker = /Viết bình luận|Write a comment|Phù hợp nhất|Most relevant|Bình luận|Comment|Reply|Trả lời|Thích|Like/i;
+        const complementary = Array.from(document.querySelectorAll('[role="complementary"]'))
+          .filter(visible)
+          .map((element) => {
+            const text = (element.innerText || element.textContent || "").trim();
+            return { text, length: text.length };
+          })
+          .filter((item) => item.length > 100)
+          .filter((item) => hasPanelHeading(item.text) && hasCommentAction(item.text))
+          .sort((a, b) => a.length - b.length);
+        if (complementary.length) {
+          return {
+            text: complementary[0].text,
+            bodyText: "",
+            candidates: complementary.slice(0, 8).map((item) => `complementary:${item.length}`)
+          };
+        }
+
+        const selectors = ['[role="dialog"]', '[aria-label*="Bình luận"]', '[aria-label*="Comment" i]'];
+        const candidates = selectors
+          .flatMap((selector) => Array.from(document.querySelectorAll(selector)))
+          .filter(visible)
+          .map((element) => {
+            const text = (element.innerText || element.textContent || "").trim();
+            const aria = (element.getAttribute("aria-label") || "").trim();
+            const rect = element.getBoundingClientRect();
+            return { label: `${element.getAttribute("role") ?? element.tagName}:${aria}`.replace(/\s+/g, " "), text, area: rect.width * rect.height };
+          })
+          .filter((item) => item.text.length > 0)
+          .sort((a, b) => Number(marker.test(b.text)) - Number(marker.test(a.text)) || b.text.length - a.text.length || b.area - a.area);
+        const preferred =
+          candidates.find((item) => item.text.length > initialLength && marker.test(item.text)) ??
+          candidates.find((item) => marker.test(item.text)) ??
+          candidates.find((item) => item.text.length > initialLength) ??
+          null;
+        const bodyText = (document.body.innerText || document.body.textContent || "").trim();
+        return {
+          text: preferred?.text ?? "",
+          bodyText,
+          candidates: candidates.slice(0, 8).map((item) => `${item.label}:${item.text.replace(/\s+/g, " ").slice(0, 160)}`)
+        };
+      }, beforeLength)
+      .catch(() => ({ text: "", bodyText: "", candidates: [] as string[] }));
+
+    panelCandidates = result.candidates;
+    if (result.text) {
+      panelSelected = result.candidates[0] ?? null;
+    }
+    return normalizeText(result.text || result.bodyText);
+  }
 
   function ownerChanged(text: string): boolean {
     const current = extractReelDataFromViewerText(text).owner;
@@ -2076,14 +2188,52 @@ async function openReelCommentsPanel(page: Page, viewerText: string, commentCoun
   }
 
   async function panelLooksOpen(): Promise<boolean> {
-    panelText = normalizeText(await reelViewerText(page));
+    panelText = await collectPanelText();
     if (ownerChanged(panelText)) {
       return false;
+    }
+    const expandedLocator =
+      commentCount === null
+        ? page.locator('[role="button"][aria-expanded="true"]')
+        : page.locator('[role="button"][aria-expanded="true"]').filter({ hasText: new RegExp(`\\b${commentCount}\\b`) });
+    const expanded = await expandedLocator
+      .first()
+      .count()
+      .then((count) => count > 0)
+      .catch(() => false);
+    if (expanded) {
+      return true;
     }
     if (/Viết bình luận|Write a comment|Phù hợp nhất|Most relevant|Tất cả bình luận|All comments/i.test(panelText)) {
       return true;
     }
     return beforeLength > 0 && panelText.length > beforeLength + 200;
+  }
+
+  async function clickPreferredCommentButton(): Promise<string | null> {
+    const roleClicked = await page
+      .getByRole("button", { name: /^(Bình luận|Comment|Comments)$/i })
+      .first()
+      .click({ timeout: 1500 })
+      .then(() => true)
+      .catch(() => false);
+    if (roleClicked) {
+      return "aria-label-binh-luan";
+    }
+
+    for (const selector of ['[role="button"][aria-label*="Bình luận"]', '[role="button"][aria-label*="Comment" i]']) {
+      const clickedSelector = await page
+        .locator(selector)
+        .first()
+        .click({ timeout: 1500 })
+        .then(() => true)
+        .catch(() => false);
+      if (clickedSelector) {
+        return "aria-label-binh-luan";
+      }
+    }
+
+    return null;
   }
 
   async function clickStrategy(strategy: "exact-count" | "aria-comment" | "metric-cluster" | "role-button-scan"): Promise<string | null> {
@@ -2156,6 +2306,31 @@ async function openReelCommentsPanel(page: Page, viewerText: string, commentCoun
       .catch(() => null);
   }
 
+  attempts.push("role-aria-label-binh-luan");
+  const preferredClicked = await clickPreferredCommentButton();
+  if (preferredClicked) {
+    clicked = preferredClicked;
+    await page.waitForTimeout(2000).catch(() => undefined);
+    await appendComplementaryDebug();
+    await page.waitForTimeout(5000).catch(() => undefined);
+    await appendComplementaryDebug("-after-wait");
+    await page
+      .getByText(/Viết bình luận|Write a comment|Phù hợp nhất|Most relevant|Bình luận/i)
+      .first()
+      .waitFor({ timeout: 2500 })
+      .catch(() => undefined);
+    if (await panelLooksOpen()) {
+      return { opened: true, attempts, clicked, coordinateClick, panelText, panelSelected, panelCandidates, complementaryDebug };
+    }
+    await pause(650);
+    if (await panelLooksOpen()) {
+      return { opened: true, attempts, clicked, coordinateClick, panelText, panelSelected, panelCandidates, complementaryDebug };
+    }
+    if (ownerChanged(panelText)) {
+      return { opened: false, attempts, clicked: "misclick-owner-changed", coordinateClick, panelText, panelSelected, panelCandidates, complementaryDebug };
+    }
+  }
+
   for (const strategy of ["exact-count", "aria-comment", "metric-cluster", "role-button-scan"] as const) {
     attempts.push(strategy);
     const result = await clickStrategy(strategy);
@@ -2165,22 +2340,22 @@ async function openReelCommentsPanel(page: Page, viewerText: string, commentCoun
     clicked = result;
     await pause(1200);
     if (await panelLooksOpen()) {
-      return { opened: true, attempts, clicked, coordinateClick, panelText };
+      return { opened: true, attempts, clicked, coordinateClick, panelText, panelSelected, panelCandidates, complementaryDebug };
     }
     if (ownerChanged(panelText)) {
-      return { opened: false, attempts, clicked: "misclick-owner-changed", coordinateClick, panelText };
+      return { opened: false, attempts, clicked: "misclick-owner-changed", coordinateClick, panelText, panelSelected, panelCandidates, complementaryDebug };
     }
     await pause(650);
     if (await panelLooksOpen()) {
-      return { opened: true, attempts, clicked, coordinateClick, panelText };
+      return { opened: true, attempts, clicked, coordinateClick, panelText, panelSelected, panelCandidates, complementaryDebug };
     }
     if (ownerChanged(panelText)) {
-      return { opened: false, attempts, clicked: "misclick-owner-changed", coordinateClick, panelText };
+      return { opened: false, attempts, clicked: "misclick-owner-changed", coordinateClick, panelText, panelSelected, panelCandidates, complementaryDebug };
     }
   }
 
   await panelLooksOpen();
-  return { opened: false, attempts, clicked: clicked ?? "none-safe-selector-found", coordinateClick: "disabled", panelText };
+  return { opened: false, attempts, clicked: clicked ?? "none-safe-selector-found", coordinateClick: "disabled", panelText, panelSelected, panelCandidates, complementaryDebug };
 }
 
 async function openReelCommentsPanelLegacy(page: Page): Promise<boolean> {
@@ -2421,6 +2596,15 @@ function extractReelCaption(text: string): string {
   return content && content.length >= 8 && !isCommentLikeArticleText(content) ? content : POST_CONTENT_UNAVAILABLE;
 }
 
+function commentsOnlyTextFromPanel(panelText: string): string {
+  const lines = normalizeText(panelText)
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const markerIndex = lines.findIndex((line) => foldForUiMatch(line).includes("binh luan"));
+  return (markerIndex >= 0 ? lines.slice(markerIndex + 1) : lines).join("\n");
+}
+
 function parseReelViewerText(text: string): {
   owner: string | null;
   caption: string | null;
@@ -2513,7 +2697,10 @@ async function parseReelPage(page: Page, targetUrl: string, initialDebugMarkers:
   rawTextParts.push(`[facebook-reel-comment-clicked=${commentPanel.clicked ?? ""}]`);
   rawTextParts.push(`[facebook-reel-coordinate-click=${commentPanel.coordinateClick ?? ""}]`);
   rawTextParts.push(`[facebook-reel-comment-panel-opened=${commentPanel.opened ? "true" : "false"}]`);
-  rawTextParts.push(`[facebook-reel-comment-panel-text-start=${compactDebugText(commentPanel.panelText)}]`);
+  rawTextParts.push(`[facebook-reel-comment-panel-selected=${commentPanel.panelSelected ?? ""}]`);
+  rawTextParts.push(`[facebook-reel-comment-panel-candidates=${compactDebugText(commentPanel.panelCandidates.join(" | "), 2000)}]`);
+  rawTextParts.push(...commentPanel.complementaryDebug);
+  rawTextParts.push(`[facebook-reel-comment-panel-text-start=${compactDebugText(commentPanel.panelText, 500)}]`);
   const expansionStats = commentPanel.opened ? await expandReelCommentControls(page) : { comments: 0, replies: 0 };
   const rawText = normalizeText(await reelViewerText(page)) || parserInput;
   const fallbackCaption = extractReelCaption(rawText);
@@ -2523,12 +2710,14 @@ async function parseReelPage(page: Page, targetUrl: string, initialDebugMarkers:
     (extractedReelData.owner?.includes(NASA_HUBBLE_OWNER) || isNasaHubbleOwner(viewerParsed.owner ?? metadata.owner)) && parsedCaption.length > 20
       ? parsedCaption
       : parsedCaption || POST_CONTENT_UNAVAILABLE;
+  const commentsOnlyText = commentsOnlyTextFromPanel(commentPanel.panelText);
   const comments = commentPanel.opened
     ? filterCommentsForPost(
-        mergeComments(await collectVisibleCommentsFromReelViewer(page, caption), parseVisibleComments(rawText, caption)),
+        mergeComments(await collectVisibleCommentsFromReelViewer(page, caption), parseVisibleComments(commentsOnlyText || rawText, caption)),
         caption
       )
     : [];
+  rawTextParts.push(`[facebook-reel-comments-parsed=${comments.length}]`);
   const lines = rawText.split(/\n+/).map((line) => line.trim()).filter(Boolean);
   const likeCount = extractedReelData.likeCount ?? viewerParsed.likeCount ?? metadata.likeCount ?? metricValue(rawText, ["likes", "like"]) ?? null;
   const commentCount =
