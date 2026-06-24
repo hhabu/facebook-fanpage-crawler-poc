@@ -64,6 +64,14 @@ interface ReelViewerMetadata {
   shareCount: number | null;
 }
 
+interface ReelCommentPanelOpenResult {
+  opened: boolean;
+  attempts: string[];
+  clicked: string | null;
+  coordinateClick: string | null;
+  panelText: string;
+}
+
 function screenshotPath(bot: Bot): string {
   const dir = path.resolve(process.cwd(), "data", "screenshots", String(bot.id));
   fs.mkdirSync(dir, { recursive: true });
@@ -2054,7 +2062,128 @@ async function extractReelViewerMetadata(page: Page): Promise<ReelViewerMetadata
   };
 }
 
-async function openReelCommentsPanel(page: Page): Promise<boolean> {
+async function openReelCommentsPanel(page: Page, viewerText: string, commentCount: number | null): Promise<ReelCommentPanelOpenResult> {
+  const attempts: string[] = [];
+  let clicked: string | null = null;
+  const coordinateClick = "disabled";
+  let panelText = "";
+  const beforeLength = normalizeText(viewerText).length;
+
+  function ownerChanged(text: string): boolean {
+    const current = extractReelDataFromViewerText(text).owner;
+    const original = extractReelDataFromViewerText(viewerText).owner;
+    return Boolean(original && current && normalizedComparableText(original) !== normalizedComparableText(current));
+  }
+
+  async function panelLooksOpen(): Promise<boolean> {
+    panelText = normalizeText(await reelViewerText(page));
+    if (ownerChanged(panelText)) {
+      return false;
+    }
+    if (/Viết bình luận|Write a comment|Phù hợp nhất|Most relevant|Tất cả bình luận|All comments/i.test(panelText)) {
+      return true;
+    }
+    return beforeLength > 0 && panelText.length > beforeLength + 200;
+  }
+
+  async function clickStrategy(strategy: "exact-count" | "aria-comment" | "metric-cluster" | "role-button-scan"): Promise<string | null> {
+    return page
+      .evaluate(
+        ({ strategyName, expectedCommentCount }) => {
+          const fold = (value: string) =>
+            value
+              .normalize("NFD")
+              .replace(/[\u0300-\u036f]/g, "")
+              .toLowerCase()
+              .trim();
+          const visible = (element: Element | null): element is HTMLElement => {
+            if (!(element instanceof HTMLElement)) {
+              return false;
+            }
+            const rect = element.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+          };
+          const roots = [
+            ...Array.from(document.querySelectorAll('[role="dialog"]')).filter(visible).reverse(),
+            ...Array.from(document.querySelectorAll('[role="main"]')).filter(visible)
+          ];
+          const root = roots.find((element) => element.querySelector("video")) ?? roots[0];
+          if (!root) {
+            return null;
+          }
+          const rootRect = root.getBoundingClientRect();
+          const elements = Array.from(root.querySelectorAll('[role="button"], button, a[href], div, span, [aria-label]')) as HTMLElement[];
+          const candidates = elements
+            .map((element) => {
+              const rect = element.getBoundingClientRect();
+              const text = (element.innerText || element.textContent || "").trim();
+              const aria = (element.getAttribute("aria-label") || "").trim();
+              return {
+                element,
+                text,
+                aria,
+                folded: fold(`${aria} ${text}`),
+                role: element.getAttribute("role"),
+                left: rect.left,
+                top: rect.top,
+                right: rect.right,
+                width: rect.width,
+                height: rect.height
+              };
+            })
+            .filter((item) => item.width > 0 && item.height > 0)
+            .filter((item) => item.left >= rootRect.left && item.right <= rootRect.right + 8);
+          const rightSide = candidates.filter((item) => item.left > rootRect.left + rootRect.width * 0.45);
+          const expected = expectedCommentCount === null ? null : String(expectedCommentCount);
+          const target =
+            strategyName === "exact-count"
+              ? rightSide.find((item) => item.text.replace(/[,.]/g, "") === expected && /\b(comment|comments|binh luan)\b|bình luận/i.test(item.folded)) ?? null
+              : strategyName === "aria-comment"
+                ? rightSide.find((item) => /\b(comment|comments|binh luan)\b|bình luận/i.test(item.folded)) ?? null
+              : strategyName === "metric-cluster"
+                  ? null
+                  : rightSide.find((item) => item.role === "button" && (/\b(comment|comments|binh luan)\b|bình luận/i.test(item.folded) || item.text === expected)) ??
+                    rightSide.find((item) => /\b(comment|comments|binh luan)\b|bình luận/i.test(item.folded)) ??
+                    null;
+          if (!target) {
+            return null;
+          }
+          target.element.click();
+          return `${strategyName}:${target.aria || target.text || target.folded}`;
+        },
+        { strategyName: strategy, expectedCommentCount: commentCount }
+      )
+      .catch(() => null);
+  }
+
+  for (const strategy of ["exact-count", "aria-comment", "metric-cluster", "role-button-scan"] as const) {
+    attempts.push(strategy);
+    const result = await clickStrategy(strategy);
+    if (!result) {
+      continue;
+    }
+    clicked = result;
+    await pause(1200);
+    if (await panelLooksOpen()) {
+      return { opened: true, attempts, clicked, coordinateClick, panelText };
+    }
+    if (ownerChanged(panelText)) {
+      return { opened: false, attempts, clicked: "misclick-owner-changed", coordinateClick, panelText };
+    }
+    await pause(650);
+    if (await panelLooksOpen()) {
+      return { opened: true, attempts, clicked, coordinateClick, panelText };
+    }
+    if (ownerChanged(panelText)) {
+      return { opened: false, attempts, clicked: "misclick-owner-changed", coordinateClick, panelText };
+    }
+  }
+
+  await panelLooksOpen();
+  return { opened: false, attempts, clicked: clicked ?? "none-safe-selector-found", coordinateClick: "disabled", panelText };
+}
+
+async function openReelCommentsPanelLegacy(page: Page): Promise<boolean> {
   const opened = await page
     .evaluate(() => {
       const fold = (value: string) =>
@@ -2376,10 +2505,16 @@ async function parseReelPage(page: Page, targetUrl: string, initialDebugMarkers:
   const parserInput = normalizeText(viewerTextNormalized || viewerTextStart || mainText || bodyDebugText || "");
   const extractedReelData = extractReelDataFromViewerText(parserInput);
   const viewerParsed = parseReelViewerText(parserInput);
-  const shouldTryComments = !rawTextParts.some((part) => part === "[facebook-reel-buttons=]");
-  const commentsPanelOpened = shouldTryComments ? await openReelCommentsPanel(page) : false;
+  const initialCommentCount =
+    extractedReelData.commentCount ?? viewerParsed.commentCount ?? metadata.commentCount ?? metricValue(parserInput, ["comments", "comment"]) ?? null;
+  const commentPanel = await openReelCommentsPanel(page, parserInput, initialCommentCount);
   rawTextParts.push(...(await reelDebugSnapshotMarkers(page, "after-click")));
-  const expansionStats = commentsPanelOpened ? await expandReelCommentControls(page) : { comments: 0, replies: 0 };
+  rawTextParts.push(`[facebook-reel-comment-open-attempts=${commentPanel.attempts.join("|")}]`);
+  rawTextParts.push(`[facebook-reel-comment-clicked=${commentPanel.clicked ?? ""}]`);
+  rawTextParts.push(`[facebook-reel-coordinate-click=${commentPanel.coordinateClick ?? ""}]`);
+  rawTextParts.push(`[facebook-reel-comment-panel-opened=${commentPanel.opened ? "true" : "false"}]`);
+  rawTextParts.push(`[facebook-reel-comment-panel-text-start=${compactDebugText(commentPanel.panelText)}]`);
+  const expansionStats = commentPanel.opened ? await expandReelCommentControls(page) : { comments: 0, replies: 0 };
   const rawText = normalizeText(await reelViewerText(page)) || parserInput;
   const fallbackCaption = extractReelCaption(rawText);
   const metadataCaption = metadata.caption !== POST_CONTENT_UNAVAILABLE ? metadata.caption : null;
@@ -2388,7 +2523,7 @@ async function parseReelPage(page: Page, targetUrl: string, initialDebugMarkers:
     (extractedReelData.owner?.includes(NASA_HUBBLE_OWNER) || isNasaHubbleOwner(viewerParsed.owner ?? metadata.owner)) && parsedCaption.length > 20
       ? parsedCaption
       : parsedCaption || POST_CONTENT_UNAVAILABLE;
-  const comments = commentsPanelOpened
+  const comments = commentPanel.opened
     ? filterCommentsForPost(
         mergeComments(await collectVisibleCommentsFromReelViewer(page, caption), parseVisibleComments(rawText, caption)),
         caption
