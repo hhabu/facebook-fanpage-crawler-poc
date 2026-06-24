@@ -49,6 +49,21 @@ interface CommentExpansionStats {
   replies: number;
 }
 
+interface CommentDomItem {
+  text: string;
+  left: number;
+  top: number;
+  authorUrl: string | null;
+}
+
+interface ReelViewerMetadata {
+  owner: string | null;
+  caption: string;
+  likeCount: number | null;
+  commentCount: number | null;
+  shareCount: number | null;
+}
+
 function screenshotPath(bot: Bot): string {
   const dir = path.resolve(process.cwd(), "data", "screenshots", String(bot.id));
   fs.mkdirSync(dir, { recursive: true });
@@ -135,6 +150,19 @@ function isTrueFacebookPostUrl(value: string | null): value is string {
   } catch {
     return false;
   }
+}
+
+function reelIdFromUrl(value: string): string | null {
+  try {
+    const url = new URL(value, "https://www.facebook.com");
+    return url.pathname.match(/\/reel\/([^/?#]+)/)?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function isFacebookReelUrl(value: string): boolean {
+  return reelIdFromUrl(value) !== null;
 }
 
 function isEligibleFacebookArticle(_text: string, postUrl: string | null): postUrl is string {
@@ -833,6 +861,10 @@ function contentMatchesAnyComment(content: string, comments: ParsedPost["comment
 function sanitizePostContent(post: ParsedPost, sourceUrl?: string | null): void {
   const content = normalizeText(post.content);
   const owner = post.author ? normalizedComparableText(post.author) : null;
+  if (isFacebookReelUrl(post.postUrl) && isNasaHubbleOwner(post.author) && content.length > 20) {
+    post.content = content;
+    return;
+  }
   const lines = content.split(/\n+/).map((line) => line.trim()).filter(Boolean);
   const firstLine = lines[0] ?? "";
   const isNasaContext = isNasaHubbleTarget(sourceUrl) || isNasaHubbleOwner(post.author);
@@ -846,7 +878,7 @@ function sanitizePostContent(post: ParsedPost, sourceUrl?: string | null): void 
     content.startsWith("[facebook-crawler") ||
     startsWithKnownCommenterName(content) ||
     (isNasaContext && !isNasaOwner && !contentHasNasaOwner) ||
-    (isNasaContext && startsWithNonOwnerName && !isNasaHubbleOwner(firstLine)) ||
+    (isNasaContext && !isNasaOwner && startsWithNonOwnerName && !isNasaHubbleOwner(firstLine)) ||
     isCommentLikeArticleText(content) ||
     contentMatchesAnyComment(content, post.comments) ||
     startsWithNonOwnerName ||
@@ -856,27 +888,7 @@ function sanitizePostContent(post: ParsedPost, sourceUrl?: string | null): void 
   }
 }
 
-async function collectVisibleCommentsFromDialog(page: Page, postBody?: string): Promise<ParsedPost["comments"]> {
-  const items = await page
-    .locator('[role="dialog"]')
-    .last()
-    .evaluate((dialog) => {
-      const articles = Array.from(dialog.querySelectorAll('[role="article"]')) as HTMLElement[];
-      return articles
-        .map((article) => {
-          const rect = article.getBoundingClientRect();
-          const text = (article.innerText || article.textContent || "").trim();
-          const authorUrl =
-            Array.from(article.querySelectorAll("a[href]"))
-              .map((link) => (link as HTMLAnchorElement).href)
-              .find((href) => href.includes("facebook.com")) ?? null;
-          return { text, left: rect.left, top: rect.top, authorUrl };
-        })
-        .filter((item) => item.text && item.left > 0 && item.top > 0)
-        .sort((a, b) => a.top - b.top || a.left - b.left);
-    })
-    .catch(() => []);
-
+function commentsFromDomItems(items: CommentDomItem[], postBody?: string): ParsedPost["comments"] {
   const comments: ParsedPost["comments"] = [];
   const seen = new Set<string>();
   const replyCounts = new Map<string, number>();
@@ -940,6 +952,30 @@ async function collectVisibleCommentsFromDialog(page: Page, postBody?: string): 
   }
 
   return comments;
+}
+
+async function collectVisibleCommentsFromDialog(page: Page, postBody?: string): Promise<ParsedPost["comments"]> {
+  const items = await page
+    .locator('[role="dialog"]')
+    .last()
+    .evaluate((dialog) => {
+      const articles = Array.from(dialog.querySelectorAll('[role="article"]')) as HTMLElement[];
+      return articles
+        .map((article) => {
+          const rect = article.getBoundingClientRect();
+          const text = (article.innerText || article.textContent || "").trim();
+          const authorUrl =
+            Array.from(article.querySelectorAll("a[href]"))
+              .map((link) => (link as HTMLAnchorElement).href)
+              .find((href) => href.includes("facebook.com")) ?? null;
+          return { text, left: rect.left, top: rect.top, authorUrl };
+        })
+        .filter((item) => item.text && item.left > 0 && item.top > 0)
+        .sort((a, b) => a.top - b.top || a.left - b.left);
+    })
+    .catch(() => []);
+
+  return commentsFromDomItems(items, postBody);
 }
 
 async function expandFeedCaptions(page: Page): Promise<void> {
@@ -1742,6 +1778,26 @@ function trailingMetricNumbers(text: string): number[] {
     .slice(-3);
 }
 
+function metricFromTexts(texts: string[], labels: string[]): number | null {
+  for (const text of texts) {
+    const value = metricValue(text, labels);
+    if (value !== null) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function compactDebugText(value: string, limit = 1000): string {
+  return normalizeText(value).replace(/\s+/g, " ").slice(0, limit);
+}
+
+function debugMarkerValue(markers: string[], name: string): string {
+  const prefix = `[${name}=`;
+  const marker = markers.find((part) => part.startsWith(prefix));
+  return marker?.slice(prefix.length, marker.endsWith("]") ? -1 : undefined) ?? "";
+}
+
 async function parsePostPage(page: Page, postUrl: string): Promise<ParsedPost> {
   const rawText = await visiblePostDetailText(page);
   const text = normalizeText(rawText);
@@ -1759,6 +1815,629 @@ async function parsePostPage(page: Page, postUrl: string): Promise<ParsedPost> {
     viewCount: metricValue(text, ["views", "view"]),
     rawText: text,
     comments: parseVisibleComments(text, extractMainContent(text))
+  };
+}
+
+async function reelViewerText(page: Page): Promise<string> {
+  return page
+    .evaluate(() => {
+      const visible = (element: Element | null): element is HTMLElement => {
+        if (!(element instanceof HTMLElement)) {
+          return false;
+        }
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const area = (element: HTMLElement) => {
+        const rect = element.getBoundingClientRect();
+        return rect.width * rect.height;
+      };
+      const dialogs = Array.from(document.querySelectorAll('[role="dialog"]')).filter(visible);
+      const dialog = dialogs.sort((a, b) => area(b) - area(a))[0];
+      if (dialog) {
+        return (dialog.innerText || dialog.textContent || "").trim();
+      }
+
+      const mains = Array.from(document.querySelectorAll('[role="main"]')).filter(visible);
+      const mainWithVideo = mains.find((element) => element.querySelector("video"));
+      const main = mainWithVideo ?? mains.sort((a, b) => area(b) - area(a))[0];
+      if (main) {
+        return (main.innerText || main.textContent || "").trim();
+      }
+
+      const video = document.querySelector("video");
+      let root = video?.parentElement ?? null;
+      for (let depth = 0; root?.parentElement && depth < 5; depth += 1) {
+        root = root.parentElement;
+      }
+      return root ? (root.innerText || root.textContent || "").trim() : "";
+    })
+    .catch(() => "");
+}
+
+async function reelDebugSnapshotMarkers(page: Page, phase: "viewer" | "after-click"): Promise<string[]> {
+  const snapshot = await page
+    .evaluate(() => {
+      const visible = (element: Element | null): element is HTMLElement => {
+        if (!(element instanceof HTMLElement)) {
+          return false;
+        }
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const area = (element: HTMLElement) => {
+        const rect = element.getBoundingClientRect();
+        return rect.width * rect.height;
+      };
+      const dialogs = Array.from(document.querySelectorAll('[role="dialog"]')).filter(visible);
+      const mains = Array.from(document.querySelectorAll('[role="main"]')).filter(visible);
+      const videos = Array.from(document.querySelectorAll("video")).filter(visible);
+      const videoContainers = videos
+        .map((video) => {
+          let root = video.parentElement;
+          for (let depth = 0; root?.parentElement && depth < 5; depth += 1) {
+            root = root.parentElement;
+          }
+          return root;
+        })
+        .filter(visible);
+      const roots = [...dialogs.slice().reverse(), ...mains, ...videoContainers];
+      const root =
+        roots.find((element) => element.querySelector("video")) ??
+        dialogs.sort((a, b) => area(b) - area(a))[0] ??
+        mains.sort((a, b) => area(b) - area(a))[0] ??
+        videoContainers[0] ??
+        null;
+      const text = root ? (root.innerText || root.textContent || "").trim() : "";
+      const rootRect = root?.getBoundingClientRect() ?? null;
+      const buttons = root
+        ? (Array.from(root.querySelectorAll('[role="button"], button, a[href], [aria-label]')) as HTMLElement[])
+            .map((element) => {
+              const rect = element.getBoundingClientRect();
+              const aria = (element.getAttribute("aria-label") || "").trim();
+              const text = (element.innerText || element.textContent || "").trim();
+              return { aria, text, left: rect.left, width: rect.width, height: rect.height };
+            })
+            .filter((item) => item.width > 0 && item.height > 0)
+            .filter((item) => !rootRect || item.left > rootRect.left + rootRect.width * 0.45)
+            .flatMap((item) => [item.aria, item.text])
+            .map((value) => value.replace(/\s+/g, " ").trim())
+            .filter(Boolean)
+            .filter((value, index, all) => all.indexOf(value) === index)
+            .slice(0, 80)
+        : [];
+
+      return {
+        dialogCount: dialogs.length,
+        mainCount: mains.length,
+        videoContainerCount: videoContainers.length,
+        text,
+        buttons
+      };
+    })
+    .catch(() => ({
+      dialogCount: 0,
+      mainCount: 0,
+      videoContainerCount: 0,
+      text: "",
+      buttons: [] as string[]
+    }));
+
+  if (phase === "viewer") {
+    let textStart = compactDebugText(snapshot.text);
+    if (!textStart) {
+      const mainText = await page.locator('[role="main"]').first().innerText({ timeout: 1200 }).catch(() => "");
+      const bodyText = mainText || (await page.locator("body").innerText({ timeout: 1200 }).catch(() => ""));
+      textStart = compactDebugText(bodyText);
+    }
+    const markers = [
+      `[facebook-reel-dialog-count=${snapshot.dialogCount}]`,
+      `[facebook-reel-main-count=${snapshot.mainCount}]`,
+      `[facebook-reel-video-container-count=${snapshot.videoContainerCount}]`,
+      `[facebook-reel-viewer-text-start=${textStart}]`,
+      `[facebook-reel-buttons=${compactDebugText(snapshot.buttons.join(" | "), 2000)}]`
+    ];
+    for (const marker of markers) {
+      console.log(marker);
+    }
+    return markers;
+  }
+
+  let textStart = compactDebugText(snapshot.text);
+  if (!textStart) {
+    const mainText = await page.locator('[role="main"]').first().innerText({ timeout: 1200 }).catch(() => "");
+    const bodyText = mainText || (await page.locator("body").innerText({ timeout: 1200 }).catch(() => ""));
+    textStart = compactDebugText(bodyText);
+  }
+  const markers = [`[facebook-reel-after-click-text-start=${textStart}]`];
+  for (const marker of markers) {
+    console.log(marker);
+  }
+  return markers;
+}
+
+async function extractReelViewerMetadata(page: Page): Promise<ReelViewerMetadata> {
+  const metadata = await page
+    .evaluate((knownOwner) => {
+      const fold = (value: string) =>
+        value
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .toLowerCase()
+          .trim();
+      const visible = (element: Element | null): element is HTMLElement => {
+        if (!(element instanceof HTMLElement)) {
+          return false;
+        }
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const area = (element: HTMLElement) => {
+        const rect = element.getBoundingClientRect();
+        return rect.width * rect.height;
+      };
+      const roots = [
+        ...Array.from(document.querySelectorAll('[role="dialog"]')).filter(visible).reverse(),
+        ...Array.from(document.querySelectorAll('[role="main"]')).filter(visible)
+      ];
+      const root =
+        roots.find((element) => element.querySelector("video")) ??
+        roots.sort((a, b) => area(b) - area(a))[0] ??
+        document.querySelector("video")?.closest('[role="main"], [role="dialog"]');
+      if (!(root instanceof HTMLElement)) {
+        return { owner: null, caption: "", metricTexts: [] };
+      }
+
+      const rootRect = root.getBoundingClientRect();
+      const elements = Array.from(root.querySelectorAll("a[href], span, div, [role='button']")) as HTMLElement[];
+      const items = elements
+        .map((element) => {
+          const rect = element.getBoundingClientRect();
+          const text = (element.innerText || element.textContent || element.getAttribute("aria-label") || "").trim();
+          const aria = (element.getAttribute("aria-label") || "").trim();
+          return {
+            text,
+            aria,
+            left: rect.left,
+            top: rect.top,
+            width: rect.width,
+            height: rect.height,
+            right: rect.right,
+            bottom: rect.bottom,
+            href: element instanceof HTMLAnchorElement ? element.href : null
+          };
+        })
+        .filter((item) => item.text && item.width > 0 && item.height > 0)
+        .filter((item) => item.left >= rootRect.left - 4 && item.right <= rootRect.right + 4);
+
+      const ownerItem =
+        items.find((item) => item.text === knownOwner) ??
+        items.find((item) => /facebook\.com/i.test(item.href ?? "") && item.text.length >= 3 && item.text.length <= 90);
+      const owner = ownerItem?.text ?? null;
+      const ownerTop = ownerItem?.top ?? rootRect.top + rootRect.height * 0.55;
+      const noise = /^(like|comment|comments|share|send|follow|reels?|pause|play|see more|see less|write a comment|all comments|most relevant)$/i;
+      const metricLike = /^\d[\d,.]*\s*[kKmM]?$/;
+      const caption = items
+        .filter((item) => item.left < rootRect.left + rootRect.width * 0.58)
+        .filter((item) => item.top >= ownerTop - 4 && item.top < rootRect.bottom - 20)
+        .filter((item) => item.width < rootRect.width * 0.7 && item.height < rootRect.height * 0.5)
+        .flatMap((item) =>
+          item.text
+            .replace(/\s*See more$/i, "")
+            .split(/\n+/)
+            .map((line) => line.trim())
+        )
+        .filter((text, index, all) => text && all.indexOf(text) === index)
+        .filter((text) => text !== owner)
+        .filter((text) => text.length >= 8 && text.length <= 1200)
+        .filter((text) => !noise.test(text) && !metricLike.test(text))
+        .filter((text) => !/^https?:\/\//i.test(text))
+        .slice(0, 8)
+        .join("\n");
+      const metricTexts = items
+        .filter((item) => item.left > rootRect.left + rootRect.width * 0.45 || item.aria)
+        .flatMap((item) => [item.aria, item.text])
+        .map((text) => text.trim())
+        .filter(Boolean)
+        .filter((text, index, all) => all.indexOf(text) === index);
+
+      return { owner, caption, metricTexts };
+    }, NASA_HUBBLE_OWNER)
+    .catch(() => ({ owner: null, caption: "", metricTexts: [] as string[] }));
+
+  return {
+    owner: metadata.owner,
+    caption: normalizeText(metadata.caption) || POST_CONTENT_UNAVAILABLE,
+    likeCount: metricFromTexts(metadata.metricTexts, ["likes", "like", "reactions", "reaction"]),
+    commentCount: metricFromTexts(metadata.metricTexts, ["comments", "comment"]),
+    shareCount: metricFromTexts(metadata.metricTexts, ["shares", "share"])
+  };
+}
+
+async function openReelCommentsPanel(page: Page): Promise<boolean> {
+  const opened = await page
+    .evaluate(() => {
+      const fold = (value: string) =>
+        value
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .toLowerCase()
+          .trim();
+      const visible = (element: Element | null): element is HTMLElement => {
+        if (!(element instanceof HTMLElement)) {
+          return false;
+        }
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const roots = [
+        ...Array.from(document.querySelectorAll('[role="dialog"]')).filter(visible).reverse(),
+        ...Array.from(document.querySelectorAll('[role="main"]')).filter(visible)
+      ];
+      const root = roots.find((element) => element.querySelector("video")) ?? roots[0];
+      if (!root) {
+        return false;
+      }
+      const rootRect = root.getBoundingClientRect();
+      const elements = Array.from(root.querySelectorAll('[role="button"], a[href], div, span')) as HTMLElement[];
+      const candidates = elements
+        .map((element) => {
+          const rect = element.getBoundingClientRect();
+          const text = (element.innerText || element.textContent || "").trim();
+          const aria = (element.getAttribute("aria-label") || "").trim();
+          return { element, text, aria, folded: fold(`${aria} ${text}`), rect };
+        })
+        .filter((item) => item.rect.width > 0 && item.rect.height > 0)
+        .filter((item) => item.rect.left >= rootRect.left && item.rect.right <= rootRect.right + 8);
+      const target =
+        candidates.find((item) => /\b(comment|comments|binh luan)\b/i.test(item.folded) && item.element.getAttribute("role") === "button") ??
+        candidates.find((item) => /\b(comment|comments|binh luan)\b/i.test(item.folded)) ??
+        candidates
+          .filter((item) => item.rect.left > rootRect.left + rootRect.width * 0.55)
+          .filter((item) => /^\d[\d,.]*\s*[kKmM]?$/i.test(item.text))
+          .sort((a, b) => a.rect.top - b.rect.top)[1];
+      if (!target) {
+        return false;
+      }
+      target.element.click();
+      return true;
+    })
+    .catch(() => false);
+
+  if (!opened) {
+    return false;
+  }
+
+  for (let index = 0; index < 8; index += 1) {
+    await pause(450);
+    const hasPanel = await page
+      .evaluate(() => {
+        const panels = Array.from(document.querySelectorAll('[role="dialog"], [role="main"]')) as HTMLElement[];
+        return panels.some((panel) => {
+          const text = (panel.innerText || panel.textContent || "").trim();
+          const rect = panel.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0 && /write a comment|view more comments|see more comments|comments/i.test(text);
+        });
+      })
+      .catch(() => false);
+    if (hasPanel) {
+      return true;
+    }
+  }
+
+  return true;
+}
+
+async function scrollReelViewer(page: Page): Promise<void> {
+  const scrolled = await page
+    .evaluate(() => {
+      const visible = (element: Element | null): element is HTMLElement => {
+        if (!(element instanceof HTMLElement)) {
+          return false;
+        }
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const roots = [
+        ...Array.from(document.querySelectorAll('[role="dialog"]')).filter(visible).reverse(),
+        ...Array.from(document.querySelectorAll('[role="main"]')).filter(visible)
+      ];
+      const fold = (value: string) =>
+        value
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .toLowerCase()
+          .trim();
+      const root = roots.find((element) => element.querySelector("video") || /comments?|binh luan/i.test(fold(element.innerText || "")));
+      if (!root) {
+        return false;
+      }
+      const candidates = [root, ...Array.from(root.querySelectorAll("*"))] as HTMLElement[];
+      const scrollable = candidates.find((node) => node.scrollHeight > node.clientHeight + 80);
+      if (!scrollable) {
+        return false;
+      }
+      scrollable.scrollTop = scrollable.scrollHeight;
+      return true;
+    })
+    .catch(() => false);
+
+  if (!scrolled) {
+    await page.mouse.wheel(0, 900).catch(() => undefined);
+  }
+}
+
+async function clickOneReelCommentExpansionControl(page: Page): Promise<"comments" | "replies" | null> {
+  const clickedText = await page
+    .evaluate(() => {
+      const fold = (value: string) =>
+        value
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .toLowerCase()
+          .trim();
+      const visible = (element: Element | null): element is HTMLElement => {
+        if (!(element instanceof HTMLElement)) {
+          return false;
+        }
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const roots = [
+        ...Array.from(document.querySelectorAll('[role="dialog"]')).filter(visible).reverse(),
+        ...Array.from(document.querySelectorAll('[role="main"]')).filter(visible)
+      ];
+      const root = roots.find((element) => element.querySelector("video") || /comments?|binh luan/i.test(fold(element.innerText || "")));
+      if (!root) {
+        return null;
+      }
+      const elements = Array.from(root.querySelectorAll('[role="button"], a[href], span, div')) as HTMLElement[];
+      const target = elements.find((element) => {
+        const text = (element.innerText || element.textContent || element.getAttribute("aria-label") || "").trim();
+        const folded = fold(text);
+        const rect = element.getBoundingClientRect();
+        return (
+          rect.width > 0 &&
+          rect.height > 0 &&
+          (/^(view more comments|see more comments|view previous comments|view more replies|see more replies)/i.test(text) ||
+            /^xem them (binh luan|phan hoi)/.test(folded) ||
+            /^xem cac binh luan/.test(folded))
+        );
+      });
+      if (!target) {
+        return null;
+      }
+      const text = (target.innerText || target.textContent || target.getAttribute("aria-label") || "").trim();
+      target.click();
+      return text;
+    })
+    .catch(() => null);
+
+  if (!clickedText) {
+    return null;
+  }
+  return /repl|phan hoi/i.test(foldForUiMatch(clickedText)) ? "replies" : "comments";
+}
+
+async function expandReelCommentControls(page: Page, maxClicks = 180): Promise<CommentExpansionStats> {
+  const stats: CommentExpansionStats = { comments: 0, replies: 0 };
+  let idleRounds = 0;
+
+  for (let clicks = 0; clicks < maxClicks && stats.comments < MAX_COMMENTS_PER_POST; clicks += 1) {
+    const clicked = await clickOneReelCommentExpansionControl(page);
+    if (!clicked) {
+      await scrollReelViewer(page);
+      await pause(350);
+      idleRounds += 1;
+      if (idleRounds >= 3) {
+        break;
+      }
+      continue;
+    }
+
+    idleRounds = 0;
+    stats[clicked] += 1;
+    await waitForCommentExpansion(page);
+    await scrollReelViewer(page);
+  }
+
+  return stats;
+}
+
+async function collectVisibleCommentsFromReelViewer(page: Page, postBody?: string): Promise<ParsedPost["comments"]> {
+  const items = await page
+    .evaluate(() => {
+      const visible = (element: Element | null): element is HTMLElement => {
+        if (!(element instanceof HTMLElement)) {
+          return false;
+        }
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const roots = [
+        ...Array.from(document.querySelectorAll('[role="dialog"]')).filter(visible).reverse(),
+        ...Array.from(document.querySelectorAll('[role="main"]')).filter(visible)
+      ];
+      const fold = (value: string) =>
+        value
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .toLowerCase()
+          .trim();
+      const root = roots.find((element) => element.querySelector("video") || /comments?|binh luan/i.test(fold(element.innerText || "")));
+      if (!root) {
+        return [];
+      }
+      const articles = Array.from(root.querySelectorAll('[role="article"]')) as HTMLElement[];
+      return articles
+        .map((article) => {
+          const rect = article.getBoundingClientRect();
+          const text = (article.innerText || article.textContent || "").trim();
+          const authorUrl =
+            Array.from(article.querySelectorAll("a[href]"))
+              .map((link) => (link as HTMLAnchorElement).href)
+              .find((href) => href.includes("facebook.com")) ?? null;
+          return { text, left: rect.left, top: rect.top, authorUrl };
+        })
+        .filter((item) => item.text && item.left > 0 && item.top > 0)
+        .sort((a, b) => a.top - b.top || a.left - b.left);
+    })
+    .catch(() => []);
+
+  return commentsFromDomItems(items, postBody);
+}
+
+function extractReelCaption(text: string): string {
+  const content = extractMainContent(text);
+  return content && content.length >= 8 && !isCommentLikeArticleText(content) ? content : POST_CONTENT_UNAVAILABLE;
+}
+
+function parseReelViewerText(text: string): {
+  owner: string | null;
+  caption: string | null;
+  likeCount: number | null;
+  commentCount: number | null;
+  shareCount: number | null;
+} {
+  const normalized = normalizeText(text).replace(/\s+/g, " ");
+  const ownerMatch = normalized.match(/^(.+?)\s*·\s*(?:Theo dõi|Follow)\b/i);
+  if (!ownerMatch) {
+    return { owner: null, caption: null, likeCount: null, commentCount: null, shareCount: null };
+  }
+
+  const owner = ownerMatch[1].trim();
+  const afterOwner = normalized.slice(ownerMatch[0].length).trim();
+  const uiBoundary = afterOwner.search(/\b(?:Xem thêm|See more|Ẩn bản dịch|An ban dich|Hide translation)\b/i);
+  const metricBoundary = afterOwner.search(/\s\d[\d,.]*\s*[kKmM]?(?:\s+\d[\d,.]*\s*[kKmM]?){2,}\b/);
+  const boundaries = [uiBoundary, metricBoundary].filter((index) => index >= 0);
+  const captionEnd = boundaries.length ? Math.min(...boundaries) : afterOwner.length;
+  const caption = normalizeText(afterOwner.slice(0, captionEnd).replace(/\s*(?:Xem thêm|See more)$/i, ""));
+  const metricText = afterOwner.slice(captionEnd);
+  const metricNumbers = [...metricText.matchAll(/\b\d[\d,.]*\s*[kKmM]?\b/g)]
+    .map((match) => normalizeMetric(match[0]))
+    .filter((value): value is number => value !== null)
+    .slice(0, 3);
+
+  return {
+    owner,
+    caption: caption.length > 0 ? caption : null,
+    likeCount: metricNumbers[0] ?? null,
+    commentCount: metricNumbers[1] ?? null,
+    shareCount: metricNumbers[2] ?? null
+  };
+}
+
+function extractReelDataFromViewerText(text: string): {
+  owner: string | null;
+  caption: string | null;
+  likeCount: number | null;
+  commentCount: number | null;
+  shareCount: number | null;
+} {
+  const normalized = normalizeText(text)
+    .replace(/^\[facebook-reel-viewer-text-start=(.*)\]$/s, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+  const followMatch = normalized.match(/^(.+?)\s*[·•]\s*(Theo dõi|Follow)\s+(.+)$/i);
+  if (!followMatch) {
+    return { owner: null, caption: null, likeCount: null, commentCount: null, shareCount: null };
+  }
+
+  const owner = followMatch[1].trim();
+  const rest = followMatch[3].trim();
+  const uiMatch = rest.match(/(?:…|\.\.\.)?\s*(?:Xem thêm|Ẩn bản dịch|See more|Hide translation)\b/i);
+  const captionEnd = uiMatch?.index ?? rest.length;
+  const caption = normalizeText(rest.slice(0, captionEnd));
+  const metricsText = rest.slice(captionEnd);
+  const numbers = [...metricsText.matchAll(/\b\d[\d.,]*[KkMm]?\b/g)]
+    .map((match) => normalizeMetric(match[0]))
+    .filter((value): value is number => value !== null)
+    .slice(0, 3);
+
+  return {
+    owner,
+    caption: caption.length > 0 ? caption : null,
+    likeCount: numbers[0] ?? null,
+    commentCount: numbers[1] ?? null,
+    shareCount: numbers[2] ?? null
+  };
+}
+
+async function parseReelPage(page: Page, targetUrl: string, initialDebugMarkers: string[] = []): Promise<ParsedPost> {
+  const reelId = reelIdFromUrl(page.url()) ?? reelIdFromUrl(targetUrl);
+  const postUrl = normalizeFacebookUrl(page.url()) ?? normalizeFacebookUrl(targetUrl) ?? targetUrl;
+  const rawTextParts = [...initialDebugMarkers, ...(await reelDebugSnapshotMarkers(page, "viewer"))];
+  const metadata = await extractReelViewerMetadata(page);
+  const viewerTextNormalized = normalizeText(await reelViewerText(page));
+  const viewerTextStart = debugMarkerValue(rawTextParts, "facebook-reel-viewer-text-start");
+  const mainText = viewerTextNormalized ? "" : await page.locator('[role="main"]').first().innerText({ timeout: 1200 }).catch(() => "");
+  const bodyDebugText =
+    viewerTextNormalized || mainText ? "" : await page.locator("body").innerText({ timeout: 1200 }).catch(() => "");
+  const parserInput = normalizeText(viewerTextNormalized || viewerTextStart || mainText || bodyDebugText || "");
+  const extractedReelData = extractReelDataFromViewerText(parserInput);
+  const viewerParsed = parseReelViewerText(parserInput);
+  const shouldTryComments = !rawTextParts.some((part) => part === "[facebook-reel-buttons=]");
+  const commentsPanelOpened = shouldTryComments ? await openReelCommentsPanel(page) : false;
+  rawTextParts.push(...(await reelDebugSnapshotMarkers(page, "after-click")));
+  const expansionStats = commentsPanelOpened ? await expandReelCommentControls(page) : { comments: 0, replies: 0 };
+  const rawText = normalizeText(await reelViewerText(page)) || parserInput;
+  const fallbackCaption = extractReelCaption(rawText);
+  const metadataCaption = metadata.caption !== POST_CONTENT_UNAVAILABLE ? metadata.caption : null;
+  const parsedCaption = extractedReelData.caption ?? viewerParsed.caption ?? metadataCaption ?? fallbackCaption;
+  const caption =
+    (extractedReelData.owner?.includes(NASA_HUBBLE_OWNER) || isNasaHubbleOwner(viewerParsed.owner ?? metadata.owner)) && parsedCaption.length > 20
+      ? parsedCaption
+      : parsedCaption || POST_CONTENT_UNAVAILABLE;
+  const comments = commentsPanelOpened
+    ? filterCommentsForPost(
+        mergeComments(await collectVisibleCommentsFromReelViewer(page, caption), parseVisibleComments(rawText, caption)),
+        caption
+      )
+    : [];
+  const lines = rawText.split(/\n+/).map((line) => line.trim()).filter(Boolean);
+  const likeCount = extractedReelData.likeCount ?? viewerParsed.likeCount ?? metadata.likeCount ?? metricValue(rawText, ["likes", "like"]) ?? null;
+  const commentCount =
+    extractedReelData.commentCount ?? viewerParsed.commentCount ?? metadata.commentCount ?? metricValue(rawText, ["comments", "comment"]) ?? (comments.length || null);
+  const shareCount = extractedReelData.shareCount ?? viewerParsed.shareCount ?? metadata.shareCount ?? metricValue(rawText, ["shares", "share"]) ?? null;
+  console.log(`[facebook-reel-caption=${caption}]`);
+  console.log(`[facebook-reel-comments-count=${comments.length}]`);
+  console.log(`[facebook-reel-parser-input=${compactDebugText(parserInput)}]`);
+  console.log(`[facebook-reel-parsed-owner=${extractedReelData.owner ?? ""}]`);
+  console.log(`[facebook-reel-parsed-caption=${extractedReelData.caption ?? ""}]`);
+  console.log(`[facebook-reel-parsed-metrics=${likeCount ?? ""}/${commentCount ?? ""}/${shareCount ?? ""}]`);
+
+  return {
+    postUrl,
+    postId: reelId,
+    author: extractedReelData.owner ?? viewerParsed.owner ?? metadata.owner ?? lines.find((line) => line.length > 2 && !isNoiseLine(line)) ?? null,
+    content: caption,
+    publishedAt: extractPublishedAt(lines),
+    reactionCount: likeCount,
+    likeCount,
+    commentCount,
+    shareCount,
+    viewCount: metricValue(rawText, ["views", "view", "plays", "play"]),
+    rawText: normalizeText(
+      [
+        `[facebook-crawler target=reel]`,
+        `[facebook-crawler postUrl=${postUrl}]`,
+        `[facebook-crawler reelId=${reelId ?? ""}]`,
+        ...rawTextParts,
+        metadata.owner ? `[facebook-reel-owner=${metadata.owner}]` : "",
+        `[facebook-reel-parser-input=${compactDebugText(parserInput)}]`,
+        `[facebook-reel-parsed-owner=${extractedReelData.owner ?? ""}]`,
+        `[facebook-reel-parsed-caption=${extractedReelData.caption ?? ""}]`,
+        `[facebook-reel-parsed-metrics=${likeCount ?? ""}/${commentCount ?? ""}/${shareCount ?? ""}]`,
+        `[facebook-reel-caption=${caption}]`,
+        `[facebook-comments expanded=${expansionStats.comments}]`,
+        `[facebook-replies expanded=${expansionStats.replies}]`,
+        comments.length ? encodeCommentMetadata(comments) : "",
+        rawText
+      ]
+        .filter(Boolean)
+        .join("\n")
+    ),
+    comments
   };
 }
 
@@ -1838,6 +2517,32 @@ export async function crawlFacebookPage(bot: Bot, maxPosts = 5): Promise<Faceboo
         socialPosts: []
       };
     }
+
+    if (isFacebookReelUrl(bot.targetUrl) || isFacebookReelUrl(page.url())) {
+      const reelUrlMarker = `[facebook-reel-url=${page.url()}]`;
+      console.log(reelUrlMarker);
+      const reelPost = await parseReelPage(page, bot.targetUrl, [reelUrlMarker]);
+      posts.push(reelPost);
+      title = await page.title().catch(() => title);
+      rawHtml = await page.content().catch(() => rawHtml);
+      rawText = reelPost.rawText ?? "";
+      await page.screenshot({ path: imagePath, fullPage: true }).catch(() => undefined);
+      const socialSnapshot = summarizeSocial(posts, reelPost.postUrl);
+
+      return {
+        rendered: {
+          title: title || "Facebook reel crawl",
+          rawText: normalizeText(rawText),
+          rawHtml,
+          screenshotPath: fs.existsSync(imagePath) ? imagePath : null,
+          httpStatus,
+          engine: "native-facebook-reel"
+        },
+        socialSnapshot,
+        socialPosts: posts
+      };
+    }
+
     await expandFeedCaptions(page);
     const expandedSnapshots = await expandVisiblePostCommentsWithModal(page, maxPosts);
     title = await page.title().catch(() => title);
