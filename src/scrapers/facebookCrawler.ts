@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { chromium } from "playwright-core";
-import type { BrowserContext, Page } from "playwright-core";
+import type { BrowserContext, Locator, Page } from "playwright-core";
 import { getBrowserProfileRuntime, type BrowserProfileRuntime } from "../browser/browserProfileManager";
 import { findNativeChromeExecutable, killOrphanChromeForProfile } from "../browser/nativeChromeEngine";
 import type { Bot } from "../lib/botTypes";
@@ -2073,6 +2073,7 @@ async function openReelCommentsPanel(page: Page, viewerText: string, commentCoun
   let panelSelected: string | null = null;
   let panelCandidates: string[] = [];
   const complementaryDebug: string[] = [];
+  let articleDebugAppended = false;
   const beforeLength = normalizeText(viewerText).length;
 
   async function appendComplementaryDebug(suffix = ""): Promise<void> {
@@ -2100,6 +2101,42 @@ async function openReelCommentsPanel(page: Page, viewerText: string, commentCoun
     panelSelected = `complementary:${candidates[0].length}`;
     panelCandidates = [`complementary:${candidates[0].length}`];
     return candidates[0];
+  }
+
+  async function selectedComplementaryLocator(): Promise<Locator | null> {
+    const locator = page.locator('[role="complementary"]');
+    const count = await locator.count().catch(() => 0);
+    let selected: { index: number; length: number } | null = null;
+    for (let index = 0; index < count; index += 1) {
+      const item = locator.nth(index);
+      const text = normalizeText(await item.innerText({ timeout: 1200 }).catch(() => ""));
+      if (text.length <= 100 || !/(PhÃ¹ há»£p nháº¥t|BÃ¬nh luáº­n)/i.test(text) || !/(ThÃ­ch|Tráº£ lá»i)/i.test(text)) {
+        continue;
+      }
+      if (!selected || text.length < selected.length) {
+        selected = { index, length: text.length };
+      }
+    }
+    return selected ? locator.nth(selected.index) : null;
+  }
+
+  async function appendSelectedComplementaryArticleDebug(): Promise<void> {
+    if (articleDebugAppended) {
+      return;
+    }
+    articleDebugAppended = true;
+    const complementary = await selectedComplementaryLocator();
+    if (!complementary) {
+      complementaryDebug.push("[facebook-reel-comment-article-count=0]");
+      return;
+    }
+    const articles = complementary.locator('[role="article"]');
+    const count = await articles.count().catch(() => 0);
+    complementaryDebug.push(`[facebook-reel-comment-article-count=${count}]`);
+    for (let index = 0; index < Math.min(count, 5); index += 1) {
+      const text = await articles.nth(index).innerText({ timeout: 1200 }).catch(() => "");
+      complementaryDebug.push(`[facebook-reel-comment-article-${index}=${compactDebugText(text, 300)}]`);
+    }
   }
 
   async function collectPanelText(): Promise<string> {
@@ -2320,10 +2357,12 @@ async function openReelCommentsPanel(page: Page, viewerText: string, commentCoun
       .waitFor({ timeout: 2500 })
       .catch(() => undefined);
     if (await panelLooksOpen()) {
+      await appendSelectedComplementaryArticleDebug();
       return { opened: true, attempts, clicked, coordinateClick, panelText, panelSelected, panelCandidates, complementaryDebug };
     }
     await pause(650);
     if (await panelLooksOpen()) {
+      await appendSelectedComplementaryArticleDebug();
       return { opened: true, attempts, clicked, coordinateClick, panelText, panelSelected, panelCandidates, complementaryDebug };
     }
     if (ownerChanged(panelText)) {
@@ -2340,6 +2379,7 @@ async function openReelCommentsPanel(page: Page, viewerText: string, commentCoun
     clicked = result;
     await pause(1200);
     if (await panelLooksOpen()) {
+      await appendSelectedComplementaryArticleDebug();
       return { opened: true, attempts, clicked, coordinateClick, panelText, panelSelected, panelCandidates, complementaryDebug };
     }
     if (ownerChanged(panelText)) {
@@ -2347,6 +2387,7 @@ async function openReelCommentsPanel(page: Page, viewerText: string, commentCoun
     }
     await pause(650);
     if (await panelLooksOpen()) {
+      await appendSelectedComplementaryArticleDebug();
       return { opened: true, attempts, clicked, coordinateClick, panelText, panelSelected, panelCandidates, complementaryDebug };
     }
     if (ownerChanged(panelText)) {
@@ -2596,13 +2637,90 @@ function extractReelCaption(text: string): string {
   return content && content.length >= 8 && !isCommentLikeArticleText(content) ? content : POST_CONTENT_UNAVAILABLE;
 }
 
-function commentsOnlyTextFromPanel(panelText: string): string {
-  const lines = normalizeText(panelText)
+function isReelPanelCommentTimestampLine(line: string): boolean {
+  return /^(\d+\s*(phút|giờ|ngày|tuần|tháng|năm)|vừa xong)$/i.test(line.trim()) || isTimestampLine(line);
+}
+
+function isReelPanelCommentUiLine(line: string): boolean {
+  const folded = foldForUiMatch(line).replace(/:$/, "");
+  return /^(phu hop nhat|binh luan|thich|tra loi|xem ban dich|da chinh sua|đa chinh sua|giphy|most relevant|comments?|like|reply|see translation|edited)$/.test(folded);
+}
+
+function collapseRepeatedAdjacentLines(lines: string[]): string[] {
+  const collapsed: string[] = [];
+  for (const line of lines) {
+    if (collapsed.length && normalizedComparableText(collapsed[collapsed.length - 1]) === normalizedComparableText(line)) {
+      continue;
+    }
+    collapsed.push(line);
+  }
+  return collapsed;
+}
+
+function parseReelCommentsFromPanelText(panelText: string, caption?: string): ParsedPost["comments"] {
+  const allLines = normalizeText(panelText)
     .split(/\n+/)
     .map((line) => line.trim())
     .filter(Boolean);
-  const markerIndex = lines.findIndex((line) => foldForUiMatch(line).includes("binh luan"));
-  return (markerIndex >= 0 ? lines.slice(markerIndex + 1) : lines).join("\n");
+  const markerIndex = allLines.findIndex((line) => foldForUiMatch(line).replace(/:$/, "") === "binh luan");
+  const lines = (markerIndex >= 0 ? allLines.slice(markerIndex + 1) : allLines).filter((line) => !isReelPanelCommentUiLine(line));
+  const comments: ParsedPost["comments"] = [];
+  const seen = new Set<string>();
+  let authorName: string | null = null;
+  let contentLines: string[] = [];
+
+  const pushComment = (createdAtText: string) => {
+    if (!authorName) {
+      contentLines = [];
+      return;
+    }
+    const content = collapseRepeatedAdjacentLines(contentLines).join("\n").trim();
+    if (
+      !content ||
+      isReelPanelCommentTimestampLine(authorName) ||
+      isReelPanelCommentTimestampLine(content) ||
+      shouldSkipCommentCandidate(authorName, content, caption)
+    ) {
+      authorName = null;
+      contentLines = [];
+      return;
+    }
+
+    const key = `${authorName}:${content}`.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      comments.push({
+        commentId: null,
+        authorName,
+        authorUrl: null,
+        content,
+        reactionCount: null,
+        createdAtText,
+        parentCommentId: null
+      });
+    }
+
+    authorName = null;
+    contentLines = [];
+  };
+
+  for (const line of lines) {
+    if (isReelPanelCommentTimestampLine(line)) {
+      pushComment(line);
+      if (comments.length >= MAX_COMMENTS_PER_POST) {
+        break;
+      }
+      continue;
+    }
+    if (!authorName) {
+      authorName = line;
+      contentLines = [];
+      continue;
+    }
+    contentLines.push(line);
+  }
+
+  return comments.slice(0, MAX_COMMENTS_PER_POST);
 }
 
 function parseReelViewerText(text: string): {
@@ -2710,13 +2828,14 @@ async function parseReelPage(page: Page, targetUrl: string, initialDebugMarkers:
     (extractedReelData.owner?.includes(NASA_HUBBLE_OWNER) || isNasaHubbleOwner(viewerParsed.owner ?? metadata.owner)) && parsedCaption.length > 20
       ? parsedCaption
       : parsedCaption || POST_CONTENT_UNAVAILABLE;
-  const commentsOnlyText = commentsOnlyTextFromPanel(commentPanel.panelText);
-  const comments = commentPanel.opened
-    ? filterCommentsForPost(
-        mergeComments(await collectVisibleCommentsFromReelViewer(page, caption), parseVisibleComments(commentsOnlyText || rawText, caption)),
-        caption
-      )
-    : [];
+  const structuredComments = commentPanel.opened ? parseReelCommentsFromPanelText(commentPanel.panelText, caption) : [];
+  const comments =
+    commentPanel.opened && structuredComments.length
+      ? filterCommentsForPost(structuredComments, caption)
+      : commentPanel.opened
+        ? filterCommentsForPost(await collectVisibleCommentsFromReelViewer(page, caption), caption)
+        : [];
+  rawTextParts.push(`[facebook-reel-comments-parsed-structured=${structuredComments.length}]`);
   rawTextParts.push(`[facebook-reel-comments-parsed=${comments.length}]`);
   const lines = rawText.split(/\n+/).map((line) => line.trim()).filter(Boolean);
   const likeCount = extractedReelData.likeCount ?? viewerParsed.likeCount ?? metadata.likeCount ?? metricValue(rawText, ["likes", "like"]) ?? null;
