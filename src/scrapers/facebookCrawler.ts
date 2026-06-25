@@ -56,6 +56,11 @@ interface CommentDomItem {
   authorUrl: string | null;
 }
 
+interface CollectedFacebookPostUrl {
+  rawUrl: string;
+  cleanUrl: string;
+}
+
 interface ReelViewerMetadata {
   owner: string | null;
   caption: string;
@@ -126,6 +131,10 @@ function normalizeFacebookUrl(value: string): string | null {
     if (!url.hostname.includes("facebook.com")) {
       return null;
     }
+    const reelId = url.pathname.match(/\/reel\/([^/?#]+)/)?.[1];
+    if (reelId) {
+      return `https://www.facebook.com/reel/${reelId}`;
+    }
     const hasPostId =
       Boolean(url.searchParams.get("story_fbid")) ||
       Boolean(url.pathname.match(/\/(?:posts|videos|photos|reel)\/[^/?#]+/)) ||
@@ -160,6 +169,30 @@ function isTrueFacebookPostUrl(value: string | null): value is string {
     );
   } catch {
     return false;
+  }
+}
+
+function normalizeFacebookPostDetailUrl(value: string): string | null {
+  const normalized = normalizeFacebookUrl(value);
+  if (!normalized) {
+    return null;
+  }
+  const reelId = reelIdFromUrl(normalized);
+  if (reelId) {
+    return `https://www.facebook.com/reel/${reelId}`;
+  }
+
+  try {
+    const url = new URL(normalized);
+    for (const key of ["comment_id", "reply_comment_id", "__cft__", "__tn__", "mibextid", "notif_id", "notif_t"]) {
+      url.searchParams.delete(key);
+    }
+    if (url.pathname.match(/\/(?:posts|videos|photos)\/[^/?#]+/)) {
+      url.search = "";
+    }
+    return url.toString();
+  } catch {
+    return normalized;
   }
 }
 
@@ -225,26 +258,26 @@ async function recoverIfBadNavigation(page: Page, originalUrl: string): Promise<
   return false;
 }
 
-async function collectPostUrls(page: Page, targetUrl: string, limit: number): Promise<string[]> {
+async function collectPostUrls(page: Page, targetUrl: string, limit: number): Promise<CollectedFacebookPostUrl[]> {
   await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
   await pause();
 
-  const seen = new Set<string>();
+  const seen = new Map<string, string>();
   for (let index = 0; index < 8 && seen.size < limit; index += 1) {
     const links = await page
       .evaluate(() => Array.from(document.querySelectorAll("a[href]")).map((link) => (link as HTMLAnchorElement).href))
       .catch(() => []);
     for (const link of links) {
-      const normalized = normalizeFacebookUrl(link);
-      if (normalized) {
-        seen.add(normalized);
+      const normalized = normalizeFacebookPostDetailUrl(link);
+      if (isTrueFacebookPostUrl(normalized) && !seen.has(normalized)) {
+        seen.set(normalized, link);
       }
     }
     await page.mouse.wheel(0, 900).catch(() => undefined);
     await pause();
   }
 
-  return [...seen].slice(0, limit);
+  return [...seen.entries()].slice(0, limit).map(([cleanUrl, rawUrl]) => ({ rawUrl, cleanUrl }));
 }
 
 async function postUrlFromArticle(article: ReturnType<Page["locator"]>): Promise<string | null> {
@@ -1779,6 +1812,54 @@ function extractMainContent(rawText: string): string {
   return body.join("\n").slice(0, 4000) || normalizeText(postBodyText || rawText).slice(0, 4000);
 }
 
+function isPostDialogCaptionBoundaryLine(value: string): boolean {
+  const line = value.trim();
+  const folded = foldForUiMatch(line).replace(/:$/, "");
+  if (
+    /^(like|thich|comment|binh luan|share|chia se|astroventure|rubin observatory|view all comments|xem tat ca binh luan)$/.test(folded)
+  ) {
+    return true;
+  }
+
+  return [
+    /^view all comments/i,
+    /^xem t.*t c.* b.*nh lu.*n/i,
+    /^like$/i,
+    /^comment$/i,
+    /^share$/i,
+    /^th(?:ich|ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â­ch)$/i,
+    /^b.*nh lu.*n$/i,
+    /^chia s/i,
+    /^astroventure$/i,
+    /^rubin observatory$/i
+  ].some((pattern) => pattern.test(line));
+}
+
+function extractPostContentFromDialogText(dialogText: string, detectedOwner?: string | null): string {
+  const lines = normalizeText(dialogText)
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const owners = [detectedOwner, NASA_HUBBLE_OWNER].filter((value): value is string => Boolean(value && value.trim()));
+  const ownerIndex = lines.findIndex((line) => owners.some((owner) => normalizedComparableText(line).includes(normalizedComparableText(owner))));
+  if (ownerIndex < 0) {
+    return "";
+  }
+
+  const contentLines: string[] = [];
+  for (const line of lines.slice(ownerIndex + 1)) {
+    if (isPostDialogCaptionBoundaryLine(line)) {
+      break;
+    }
+    if (isFacebookLoginOrQrText(line) || isQrLoginCode(line) || isFacebookHomeSidebarLine(line)) {
+      continue;
+    }
+    contentLines.push(line);
+  }
+
+  return normalizeText(contentLines.join("\n")).slice(0, 4000);
+}
+
 function trailingMetricNumbers(text: string): number[] {
   return normalizeText(text)
     .split(/\n+/)
@@ -1809,15 +1890,80 @@ function debugMarkerValue(markers: string[], name: string): string {
   return marker?.slice(prefix.length, marker.endsWith("]") ? -1 : undefined) ?? "";
 }
 
+async function postPageDebugMarkers(page: Page): Promise<string[]> {
+  const markers: string[] = [];
+  const articles = page.locator('[role="article"]');
+  const articleCount = await articles.count().catch(() => 0);
+  markers.push(`[facebook-post-article-count=${articleCount}]`);
+  for (let index = 0; index < Math.min(articleCount, 5); index += 1) {
+    const text = await articles.nth(index).innerText({ timeout: 1200 }).catch(() => "");
+    markers.push(`[facebook-post-article-${index}=${compactDebugText(text, 400)}]`);
+  }
+
+  const dialogs = page.locator('[role="dialog"]');
+  const dialogCount = await dialogs.count().catch(() => 0);
+  markers.push(`[facebook-post-dialog-count=${dialogCount}]`);
+  for (let index = 0; index < Math.min(dialogCount, 2); index += 1) {
+    const text = await dialogs.nth(index).innerText({ timeout: 1200 }).catch(() => "");
+    markers.push(`[facebook-post-dialog-${index}=${compactDebugText(text, 400)}]`);
+  }
+
+  const mains = page.locator('[role="main"]');
+  const mainCount = await mains.count().catch(() => 0);
+  markers.push(`[facebook-post-main-count=${mainCount}]`);
+  for (let index = 0; index < Math.min(mainCount, 1); index += 1) {
+    const text = await mains.nth(index).innerText({ timeout: 1200 }).catch(() => "");
+    markers.push(`[facebook-post-main-${index}=${compactDebugText(text, 400)}]`);
+  }
+
+  const captionCandidates = await page
+    .locator('[role="feed"], [role="main"], [data-pagelet], div')
+    .evaluateAll((elements) =>
+      elements
+        .map((element) => {
+          const text = ((element as HTMLElement).innerText || element.textContent || "").trim();
+          return {
+            tagName: element.tagName,
+            role: element.getAttribute("role") ?? "",
+            pagelet: element.getAttribute("data-pagelet") ?? "",
+            length: text.length,
+            text
+          };
+        })
+        .filter(
+          (item) =>
+            item.text.includes("NASA's Hubble Space Telescope") && (item.text.includes("Read more") || item.text.includes("Xem thêm"))
+        )
+        .slice(0, 5)
+    )
+    .catch(() => []);
+  markers.push(`[facebook-post-caption-candidate-count=${captionCandidates.length}]`);
+  for (let index = 0; index < captionCandidates.length; index += 1) {
+    const candidate = captionCandidates[index];
+    markers.push(
+      `[facebook-post-caption-candidate-${index}=${candidate.length}:${candidate.tagName}:${candidate.role}:${candidate.pagelet}:${compactDebugText(candidate.text, 800)}]`
+    );
+  }
+
+  for (const marker of markers) {
+    console.log(marker);
+  }
+  return markers;
+}
+
 async function parsePostPage(page: Page, postUrl: string): Promise<ParsedPost> {
-  const rawText = await visiblePostDetailText(page);
+  const debugMarkers = await postPageDebugMarkers(page);
+  const dialogText = await visibleDialogText(page);
+  const rawText = [debugMarkers.join("\n"), await visiblePostDetailText(page)].filter(Boolean).join("\n");
   const text = normalizeText(rawText);
   const lines = text.split(/\n+/).map((line) => line.trim()).filter(Boolean);
+  const detectedOwner = lines.find((line) => line.length > 2 && !isNoiseLine(line)) ?? null;
+  const content = extractPostContentFromDialogText(dialogText, detectedOwner) || extractMainContent(text);
   return {
     postUrl,
-    postId: postIdFor(postUrl, extractMainContent(text)),
-    author: lines.find((line) => line.length > 2 && !isNoiseLine(line)) ?? null,
-    content: extractMainContent(text),
+    postId: postIdFor(postUrl, content),
+    author: detectedOwner,
+    content,
     publishedAt: extractPublishedAt(lines),
     reactionCount: metricValue(text, ["reactions", "reaction", "likes", "like"]),
     likeCount: metricValue(text, ["likes", "like"]),
@@ -1825,7 +1971,7 @@ async function parsePostPage(page: Page, postUrl: string): Promise<ParsedPost> {
     shareCount: metricValue(text, ["shares", "share"]),
     viewCount: metricValue(text, ["views", "view"]),
     rawText: text,
-    comments: parseVisibleComments(text, extractMainContent(text))
+    comments: parseVisibleComments(text, content)
   };
 }
 
@@ -2925,6 +3071,32 @@ function summarizeSocial(
   };
 }
 
+async function parseCollectedFacebookPostUrl(page: Page, collectedUrl: CollectedFacebookPostUrl): Promise<ParsedPost | null> {
+  const normalizedPostUrl = normalizeFacebookPostDetailUrl(collectedUrl.cleanUrl);
+  if (!normalizedPostUrl) {
+    return null;
+  }
+
+  const router = isFacebookReelUrl(normalizedPostUrl) ? "reel" : "post";
+  console.log(`[facebook-collected-post-url-raw=${collectedUrl.rawUrl}]`);
+  console.log(`[facebook-collected-post-url=${normalizedPostUrl}]`);
+  console.log(`[facebook-post-router=${router}]`);
+  await page.goto(normalizedPostUrl, { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => null);
+  await pause(900);
+
+  if (router === "reel") {
+    return parseReelPage(page, normalizedPostUrl, [`[facebook-collected-post-url-raw=${collectedUrl.rawUrl}]`, `[facebook-collected-post-url=${normalizedPostUrl}]`, "[facebook-post-router=reel]"]);
+  }
+
+  const post = await parsePostPage(page, normalizedPostUrl);
+  post.rawText = normalizeText(
+    [`[facebook-collected-post-url-raw=${collectedUrl.rawUrl}]`, `[facebook-collected-post-url=${normalizedPostUrl}]`, "[facebook-post-router=post]", post.rawText ?? ""]
+      .filter(Boolean)
+      .join("\n")
+  );
+  return post;
+}
+
 export async function crawlFacebookPage(bot: Bot, maxPosts = 5): Promise<FacebookCrawlOutput> {
   const profile = getBrowserProfileRuntime(bot);
   const context = await launchContext(bot, profile);
@@ -2980,6 +3152,48 @@ export async function crawlFacebookPage(bot: Bot, maxPosts = 5): Promise<Faceboo
           screenshotPath: fs.existsSync(imagePath) ? imagePath : null,
           httpStatus,
           engine: "native-facebook-reel"
+        },
+        socialSnapshot,
+        socialPosts: posts
+      };
+    }
+
+    const collectedPostUrls = await collectPostUrls(page, bot.targetUrl, maxPosts);
+    if (collectedPostUrls.length) {
+      for (const postUrl of collectedPostUrls) {
+        const post = await parseCollectedFacebookPostUrl(page, postUrl);
+        if (post) {
+          posts.push(post);
+        }
+      }
+
+      title = await page.title().catch(() => title);
+      rawHtml = await page.content().catch(() => rawHtml);
+      rawText = normalizeText(
+        [
+          ...collectedPostUrls.flatMap((postUrl) => [`[facebook-collected-post-url-raw=${postUrl.rawUrl}]`, `[facebook-collected-post-url=${postUrl.cleanUrl}]`]),
+          ...posts.map((post) => post.rawText ?? "")
+        ]
+          .filter(Boolean)
+          .join("\n\n--- FACEBOOK ROUTED POST ---\n\n")
+      );
+      await page.screenshot({ path: imagePath, fullPage: true }).catch(() => undefined);
+      for (const post of posts) {
+        sanitizePostContent(post, bot.targetUrl);
+      }
+      console.log(`[facebook-final-post-content=${posts.map((post) => post.content).join(" | ")}]`);
+      const socialSnapshot = summarizeSocial(posts, bot.targetUrl);
+      const hasReel = posts.some((post) => isFacebookReelUrl(post.postUrl));
+      const hasNonReel = posts.some((post) => !isFacebookReelUrl(post.postUrl));
+
+      return {
+        rendered: {
+          title: title || "Facebook social crawl",
+          rawText,
+          rawHtml,
+          screenshotPath: fs.existsSync(imagePath) ? imagePath : null,
+          httpStatus,
+          engine: hasReel && hasNonReel ? "native-facebook-mixed" : hasReel ? "native-facebook-reel" : "native-facebook-feed-metrics"
         },
         socialSnapshot,
         socialPosts: posts
