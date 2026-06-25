@@ -902,10 +902,22 @@ function contentMatchesAnyComment(content: string, comments: ParsedPost["comment
   });
 }
 
+function appendPostContentOverwriteDebug(post: ParsedPost, functionName: string, value: string): void {
+  const markers = [
+    `[facebook-post-content-overwrite-from=${functionName}]`,
+    `[facebook-post-content-overwrite-value=${compactDebugText(value, 300)}]`
+  ];
+  for (const marker of markers) {
+    console.log(marker);
+  }
+  post.rawText = normalizeText([post.rawText ?? "", ...markers].filter(Boolean).join("\n"));
+}
+
 function sanitizePostContent(post: ParsedPost, sourceUrl?: string | null): void {
   const content = normalizeText(post.content);
   const owner = post.author ? normalizedComparableText(post.author) : null;
   if (isFacebookReelUrl(post.postUrl) && isNasaHubbleOwner(post.author) && content.length > 20) {
+    appendPostContentOverwriteDebug(post, "sanitizePostContent:preserve-reel", content);
     post.content = content;
     return;
   }
@@ -915,6 +927,21 @@ function sanitizePostContent(post: ParsedPost, sourceUrl?: string | null): void 
   const isNasaOwner = isNasaHubbleOwner(post.author);
   const contentHasNasaOwner = textContainsNasaHubbleOwner(content);
   const startsWithNonOwnerName = isLikelyUserNameLine(firstLine) && (!owner || normalizedComparableText(firstLine) !== owner);
+  const cleanedNormalPostCaption =
+    isNasaContext &&
+    !isFacebookReelUrl(post.postUrl) &&
+    content.length > 20 &&
+    content !== POST_CONTENT_UNAVAILABLE &&
+    !content.startsWith("[facebook-") &&
+    !startsWithKnownCommenterName(content) &&
+    !isCommentLikeArticleText(content) &&
+    !contentMatchesAnyComment(content, post.comments) &&
+    !(startsWithNonOwnerName && !/[=.!?:/]/.test(firstLine));
+  if (cleanedNormalPostCaption) {
+    appendPostContentOverwriteDebug(post, "sanitizePostContent:preserve-cleaned-normal-caption", content);
+    post.content = content;
+    return;
+  }
 
   if (
     !content ||
@@ -928,6 +955,7 @@ function sanitizePostContent(post: ParsedPost, sourceUrl?: string | null): void 
     startsWithNonOwnerName ||
     (owner && !isNasaOwner && !normalizedComparableText(content).includes(owner))
   ) {
+    appendPostContentOverwriteDebug(post, "sanitizePostContent:unavailable", POST_CONTENT_UNAVAILABLE);
     post.content = POST_CONTENT_UNAVAILABLE;
   }
 }
@@ -1186,7 +1214,7 @@ async function visibleArticleTexts(page: Page): Promise<string[]> {
 }
 
 async function visiblePostDetailText(page: Page): Promise<string> {
-  const articleText = (await visibleArticleTexts(page)).join("\n\n--- FACEBOOK ARTICLE ---\n\n");
+  const articleText = (await visibleArticleTexts(page)).join("\n\n");
   const dialogText = await visibleDialogText(page);
   return [articleText, dialogText].filter(Boolean).join("\n\n--- FACEBOOK DIALOG ---\n\n");
 }
@@ -1835,29 +1863,174 @@ function isPostDialogCaptionBoundaryLine(value: string): boolean {
   ].some((pattern) => pattern.test(line));
 }
 
-function extractPostContentFromDialogText(dialogText: string, detectedOwner?: string | null): string {
-  const lines = normalizeText(dialogText)
-    .split(/\n+/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-  const owners = [detectedOwner, NASA_HUBBLE_OWNER].filter((value): value is string => Boolean(value && value.trim()));
-  const ownerIndex = lines.findIndex((line) => owners.some((owner) => normalizedComparableText(line).includes(normalizedComparableText(owner))));
-  if (ownerIndex < 0) {
+function extractPostContentFromDialogText(dialogText: string, detectedOwner?: string | null, debugMarkers: string[] = []): string {
+  const addDebugMarker = (marker: string) => {
+    debugMarkers.push(marker);
+    console.log(marker);
+  };
+  const rawLines = normalizeText(dialogText)
+    .split(/\n/)
+    .map((line) => line.trim());
+  const nonEmptyLines = rawLines.filter(Boolean);
+  for (let index = 0; index < Math.min(nonEmptyLines.length, 60); index += 1) {
+    addDebugMarker(`[facebook-post-line-${index}=${compactDebugText(nonEmptyLines[index], 500)}]`);
+  }
+  const postByIndex = nonEmptyLines.findIndex((line) => {
+    const folded = foldForUiMatch(line);
+    return folded === "bai viet cua" || /^post by$/i.test(line);
+  });
+  const ownerIndex = postByIndex >= 0 ? postByIndex + 1 : -1;
+  const ownerLine = ownerIndex >= 0 ? nonEmptyLines[ownerIndex] ?? "" : "";
+  addDebugMarker(`[facebook-post-anchor-index=${postByIndex}]`);
+  addDebugMarker(`[facebook-post-owner-index=${ownerIndex}]`);
+  addDebugMarker(`[facebook-post-owner-line=${compactDebugText(ownerLine, 300)}]`);
+  if (postByIndex < 0) {
+    addDebugMarker("[facebook-post-dialog-caption=]");
+    addDebugMarker("[facebook-post-dialog-caption-length=0]");
     return "";
   }
 
+  if (!ownerLine) {
+    addDebugMarker("[facebook-post-dialog-caption=]");
+    addDebugMarker("[facebook-post-dialog-caption-length=0]");
+    return "";
+  }
+
+  const isSkippableUiLine = (line: string): boolean => {
+    const folded = foldForUiMatch(line).replace(/:$/, "");
+    return (
+      /^(theo doi|follow|facebook|meta|like|comment|share|binh luan|thich|tra loi|xem ban dich|view translation|read more|see more|·)$/.test(folded) ||
+      line === "·"
+    );
+  };
+  const isBoundaryLine = (line: string): boolean => {
+    const folded = foldForUiMatch(line).replace(/:$/, "");
+    return (
+      /^view all comments/i.test(line) ||
+      /^xem tat ca/.test(folded) ||
+      isTimestampLine(line) ||
+      isCommentMetricLine(line) ||
+      /^\d[\d,.]*\s*(comments?|shares?|reactions?|likes?)$/i.test(line) ||
+      /^\d[\d,.]*\s*(binh luan|luot chia se|cam xuc)$/.test(folded)
+    );
+  };
+  const startsCommenterBlock = (line: string, index: number): boolean => {
+    if (!isLikelyFallbackAuthorLine(line)) {
+      return false;
+    }
+    const nextLines = nonEmptyLines.slice(index + 1, index + 5);
+    return nextLines.some(isTimestampLine) || nextLines.some((nextLine) => /^(like|reply|thich|tra loi)$/i.test(foldForUiMatch(nextLine)));
+  };
+
   const contentLines: string[] = [];
-  for (const line of lines.slice(ownerIndex + 1)) {
-    if (isPostDialogCaptionBoundaryLine(line)) {
+  for (let index = ownerIndex + 1; index < nonEmptyLines.length; index += 1) {
+    const line = nonEmptyLines[index];
+    addDebugMarker(`[facebook-post-caption-line=${compactDebugText(line, 500)}]`);
+    const boundary = isBoundaryLine(line);
+    const commenterBlock = startsCommenterBlock(line, index);
+    if (boundary || commenterBlock) {
+      addDebugMarker(`[facebook-post-stop-reason=${boundary ? "boundary" : "commenter-block"}]`);
+      addDebugMarker(`[facebook-post-stop-line=${compactDebugText(line, 500)}]`);
       break;
     }
-    if (isFacebookLoginOrQrText(line) || isQrLoginCode(line) || isFacebookHomeSidebarLine(line)) {
+    if (isSkippableUiLine(line) || isFacebookLoginOrQrText(line) || isQrLoginCode(line) || isFacebookHomeSidebarLine(line)) {
       continue;
     }
     contentLines.push(line);
   }
 
-  return normalizeText(contentLines.join("\n")).slice(0, 4000);
+  const content = normalizeText(contentLines.join("\n")).slice(0, 4000);
+  addDebugMarker(`[facebook-post-dialog-caption=${compactDebugText(content, 500)}]`);
+  addDebugMarker(`[facebook-post-dialog-caption-length=${content.length}]`);
+  return content;
+}
+
+function extractPostCaptionFromRawText(rawText: string): string {
+  const owner = NASA_HUBBLE_OWNER;
+  const normalized = normalizeText(rawText);
+  const anchor = `Bài viết của ${owner}`;
+  const anchorIndex = normalized.lastIndexOf(anchor);
+  if (anchorIndex < 0) {
+    return "";
+  }
+
+  const afterAnchor = normalized.slice(anchorIndex + anchor.length);
+  const ownerIndex = afterAnchor.indexOf(owner);
+  if (ownerIndex < 0) {
+    return "";
+  }
+
+  const afterOwner = afterAnchor.slice(ownerIndex + owner.length);
+  const boundaryPattern = new RegExp(
+    [
+      "Astroventure",
+      "Arunkumar Arun",
+      "Clark Timothee",
+      "SpacePlus",
+      "Rational Right Triangles",
+      "The Art of Nivek Siroj",
+      "Thích",
+      "Bình luận",
+      "Chia sẻ"
+    ]
+      .map((value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+      .join("|"),
+    "i"
+  );
+  const boundaryMatch = afterOwner.search(boundaryPattern);
+  const candidate = boundaryMatch >= 0 ? afterOwner.slice(0, boundaryMatch) : afterOwner;
+  const lines = normalizeText(candidate)
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => line !== anchor && line !== owner);
+  return normalizeText(lines.join("\n")).slice(0, 4000);
+}
+
+function cleanNormalPostCaption(content: string): string {
+  const normalized = normalizeText(content);
+  const separator = " · ";
+  const separatorIndex = normalized.indexOf(separator);
+  if (separatorIndex < 0) {
+    return normalized;
+  }
+
+  const prefix = normalized.slice(0, separatorIndex).trim();
+  const tokens = prefix.split(/\s+/).filter(Boolean);
+  const singleCharacterTokens = tokens.filter((token) => token.length === 1).length;
+  const mostlySingleCharacterMetadata = tokens.length >= 6 && singleCharacterTokens / tokens.length >= 0.65;
+  return mostlySingleCharacterMetadata ? normalizeText(normalized.slice(separatorIndex + separator.length)) : normalized;
+}
+
+function cleanNormalPostCaptionForMetadataNoise(content: string): string {
+  let cleaned = normalizeText(content);
+  const isolatedTokenPattern = /^[A-Za-z0-9À-ỹ]$/;
+  const mostlyIsolatedTokens = (value: string) => {
+    const tokens = value.split(/\s+/).filter(Boolean);
+    if (tokens.length < 8) {
+      return false;
+    }
+    const isolated = tokens.filter((token) => isolatedTokenPattern.test(token)).length;
+    return isolated / tokens.length >= 0.6;
+  };
+
+  const separatorMatch = cleaned.match(/\s*(?:Â·|·)\s*/);
+  if (separatorMatch?.index !== undefined) {
+    const prefix = cleaned.slice(0, separatorMatch.index).trim();
+    if (mostlyIsolatedTokens(prefix)) {
+      cleaned = normalizeText(cleaned.slice(separatorMatch.index + separatorMatch[0].length));
+    }
+  }
+
+  cleaned = normalizeText(cleaned.replace(/^([A-Za-z0-9À-ỹ]\s+){8,}/, ""));
+  cleaned = normalizeText(cleaned.replace(/^(?:Â·|·)\s*/, ""));
+
+  const knownStartMatch = cleaned.match(/\b(?:Rubin \+ Hubble\s*=|It's\b|Hubble\b|Webb\b|NASA\b|For more:)/i);
+  if (knownStartMatch?.index && knownStartMatch.index > 0 && mostlyIsolatedTokens(cleaned.slice(0, knownStartMatch.index))) {
+    cleaned = normalizeText(cleaned.slice(knownStartMatch.index));
+  }
+
+  return cleaned;
 }
 
 function trailingMetricNumbers(text: string): number[] {
@@ -1892,14 +2065,6 @@ function debugMarkerValue(markers: string[], name: string): string {
 
 async function postPageDebugMarkers(page: Page): Promise<string[]> {
   const markers: string[] = [];
-  const articles = page.locator('[role="article"]');
-  const articleCount = await articles.count().catch(() => 0);
-  markers.push(`[facebook-post-article-count=${articleCount}]`);
-  for (let index = 0; index < Math.min(articleCount, 5); index += 1) {
-    const text = await articles.nth(index).innerText({ timeout: 1200 }).catch(() => "");
-    markers.push(`[facebook-post-article-${index}=${compactDebugText(text, 400)}]`);
-  }
-
   const dialogs = page.locator('[role="dialog"]');
   const dialogCount = await dialogs.count().catch(() => 0);
   markers.push(`[facebook-post-dialog-count=${dialogCount}]`);
@@ -1915,6 +2080,11 @@ async function postPageDebugMarkers(page: Page): Promise<string[]> {
     const text = await mains.nth(index).innerText({ timeout: 1200 }).catch(() => "");
     markers.push(`[facebook-post-main-${index}=${compactDebugText(text, 400)}]`);
   }
+
+  for (const marker of markers) {
+    console.log(marker);
+  }
+  return markers;
 
   const captionCandidates = await page
     .locator('[role="feed"], [role="main"], [data-pagelet], div')
@@ -1951,28 +2121,270 @@ async function postPageDebugMarkers(page: Page): Promise<string[]> {
   return markers;
 }
 
+async function inspectPostDialogDom(page: Page): Promise<{ selectedText: string; markers: string[] }> {
+  const result = await page
+    .evaluate((ownerName) => {
+      const compact = (value: string, limit: number) => value.replace(/\s+/g, " ").trim().slice(0, limit);
+      const visible = (element: Element): element is HTMLElement => {
+        if (!(element instanceof HTMLElement)) {
+          return false;
+        }
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const boxText = (element: HTMLElement) => {
+        const rect = element.getBoundingClientRect();
+        return `${Math.round(rect.x)},${Math.round(rect.y)},${Math.round(rect.width)},${Math.round(rect.height)}`;
+      };
+      const nodeSummary = (prefix: string, index: number, element: HTMLElement, limit: number) => {
+        const text = (element.innerText || element.textContent || "").trim();
+        const pagelet = element.getAttribute("data-pagelet") || "";
+        const role = element.getAttribute("role") || "";
+        const tagName = element.tagName;
+        const childCount = element.children.length;
+        return {
+          marker: `[${prefix}-${index}=${text.length}:${tagName}:${role}:${pagelet}:box=${boxText(element)}:children=${childCount}:${compact(text, limit)}]`,
+          text,
+          tagName,
+          role,
+          pagelet,
+          childCount
+        };
+      };
+      const scoreText = (text: string) => {
+        let score = 0;
+        if (text.includes(ownerName)) {
+          score += 20;
+        }
+        if (/Rubin \+ Hubble|Hubble recently celebrated/i.test(text)) {
+          score += 30;
+        }
+        if (/Read more|Xem thêm|See more/i.test(text)) {
+          score += 5;
+        }
+        if (/Bài viết của|Post by/i.test(text)) {
+          score += 5;
+        }
+        if (/View all comments|Xem tất cả|Write a comment|Viết bình luận/i.test(text)) {
+          score -= 5;
+        }
+        return score;
+      };
+
+      const markers: string[] = [];
+      const candidates: Array<{ score: number; text: string }> = [];
+      const dialogs = Array.from(document.querySelectorAll('[role="dialog"]')).filter(visible);
+      dialogs.forEach((dialog, dialogIndex) => {
+        const dialogSummary = nodeSummary("facebook-post-dialog-dom", dialogIndex, dialog, 500);
+        markers.push(dialogSummary.marker);
+        candidates.push({ score: scoreText(dialogSummary.text), text: dialogSummary.text });
+
+        const groups = [
+          { name: "role-article", nodes: Array.from(dialog.querySelectorAll('[role="article"]')).filter(visible) },
+          { name: "article", nodes: Array.from(dialog.querySelectorAll("article")).filter(visible) },
+          { name: "data-pagelet", nodes: Array.from(dialog.querySelectorAll("[data-pagelet]")).filter(visible) }
+        ];
+        for (const group of groups) {
+          group.nodes.forEach((node, nodeIndex) => {
+            const summary = nodeSummary(`facebook-post-dialog-${dialogIndex}-${group.name}`, nodeIndex, node, 300);
+            markers.push(summary.marker);
+            candidates.push({ score: scoreText(summary.text), text: summary.text });
+          });
+        }
+      });
+
+      const selected = candidates
+        .filter((candidate) => candidate.text.trim())
+        .sort((a, b) => b.score - a.score || a.text.length - b.text.length)[0];
+      markers.push(`[facebook-post-dialog-selected-score=${selected?.score ?? 0}]`);
+      markers.push(`[facebook-post-dialog-selected-text=${compact(selected?.text ?? "", 500)}]`);
+      return { selectedText: selected && selected.score > 0 ? selected.text : "", markers };
+    }, NASA_HUBBLE_OWNER)
+    .catch(() => ({ selectedText: "", markers: [] as string[] }));
+
+  for (const marker of result.markers) {
+    console.log(marker);
+  }
+  return result;
+}
+
+async function inspectPostCaptionNodes(page: Page): Promise<string[]> {
+  const markers = await page
+    .evaluate(() => {
+      const compact = (value: string, limit: number) => value.replace(/\s+/g, " ").trim().slice(0, limit);
+      const visible = (element: Element): element is HTMLElement => {
+        if (!(element instanceof HTMLElement)) {
+          return false;
+        }
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const ancestry = (element: HTMLElement) => {
+        const parts: string[] = [];
+        let current: HTMLElement | null = element;
+        for (let depth = 0; current && depth < 8; depth += 1) {
+          const role = current.getAttribute("role");
+          const pagelet = current.getAttribute("data-pagelet");
+          const dir = current.getAttribute("dir");
+          const className = typeof current.className === "string" ? current.className.trim().split(/\s+/).slice(0, 3).join(".") : "";
+          parts.push(
+            [
+              current.tagName.toLowerCase(),
+              role ? `[@role="${role}"]` : "",
+              pagelet ? `[@data-pagelet="${pagelet}"]` : "",
+              dir ? `[@dir="${dir}"]` : "",
+              className ? `.${className}` : ""
+            ].join("")
+          );
+          current = current.parentElement;
+        }
+        return parts.reverse().join(" > ");
+      };
+      const dialogs = Array.from(document.querySelectorAll('[role="dialog"]')).filter(visible);
+      const rows: Array<{ marker: string; length: number; ancestry: string }> = [];
+      let nodeIndex = 0;
+      for (const dialog of dialogs) {
+        const candidates = Array.from(
+          dialog.querySelectorAll('div[dir="auto"], span[dir="auto"], [data-ad-preview], [data-pagelet], [role="article"]')
+        ).filter(visible);
+        for (const candidate of candidates) {
+          const text = (candidate.innerText || candidate.textContent || "").trim();
+          if (!text) {
+            continue;
+          }
+          const className = typeof candidate.className === "string" ? candidate.className.replace(/\s+/g, ".").slice(0, 160) : "";
+          const dir = candidate.getAttribute("dir") || "";
+          const tagName = candidate.tagName;
+          rows.push({
+            marker: `[facebook-caption-node-${nodeIndex}=${tagName}:${className}:${dir}:${text.length}:${compact(text, 500)}]`,
+            length: text.length,
+            ancestry: ancestry(candidate)
+          });
+          nodeIndex += 1;
+        }
+      }
+      const markers = rows.map((row) => row.marker);
+      rows
+        .slice()
+        .sort((a, b) => b.length - a.length)
+        .slice(0, 8)
+        .forEach((row, index) => {
+          markers.push(`[facebook-caption-node-ancestry-${index}=${row.length}:${compact(row.ancestry, 800)}]`);
+        });
+      return markers;
+    })
+    .catch(() => []);
+
+  for (const marker of markers) {
+    console.log(marker);
+  }
+  return markers;
+}
+
+async function inspectAlternativePostTemplate(page: Page): Promise<string[]> {
+  const markers = await page
+    .evaluate((ownerName) => {
+      const compact = (value: string, limit: number) => value.replace(/\s+/g, " ").trim().slice(0, limit);
+      const visible = (element: Element): element is HTMLElement => {
+        if (!(element instanceof HTMLElement)) {
+          return false;
+        }
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const candidates = Array.from(
+        document.querySelectorAll('[role="dialog"] [data-pagelet], [role="dialog"] [data-ad-preview], [role="dialog"] [role="article"], [role="dialog"], [role="main"]')
+      )
+        .filter(visible)
+        .map((element) => {
+          const text = (element.innerText || element.textContent || "").trim();
+          return {
+            text,
+            score:
+              (text.includes(ownerName) ? 20 : 0) +
+              (/Bài viết của|Post by|Theo dõi|Follow|Read more|Xem thêm/i.test(text) ? 8 : 0) +
+              Math.min(text.length / 500, 10)
+          };
+        })
+        .filter((candidate) => candidate.text.length > 50)
+        .sort((a, b) => b.score - a.score || b.text.length - a.text.length);
+      const selected = candidates[0]?.text ?? "";
+      return selected ? ["[facebook-post-template=alternative]", `[facebook-post-template-text=${compact(selected, 1000)}]`] : [];
+    }, NASA_HUBBLE_OWNER)
+    .catch(() => []);
+
+  for (const marker of markers) {
+    console.log(marker);
+  }
+  return markers;
+}
+
 async function parsePostPage(page: Page, postUrl: string): Promise<ParsedPost> {
-  const debugMarkers = await postPageDebugMarkers(page);
-  const dialogText = await visibleDialogText(page);
-  const rawText = [debugMarkers.join("\n"), await visiblePostDetailText(page)].filter(Boolean).join("\n");
-  const text = normalizeText(rawText);
-  const lines = text.split(/\n+/).map((line) => line.trim()).filter(Boolean);
-  const detectedOwner = lines.find((line) => line.length > 2 && !isNoiseLine(line)) ?? null;
-  const content = extractPostContentFromDialogText(dialogText, detectedOwner) || extractMainContent(text);
-  return {
+  const allDebugMarkers: string[] = [];
+  const addDebugMarker = (marker: string) => {
+    allDebugMarkers.push(marker);
+    console.log(marker);
+  };
+  allDebugMarkers.push(...(await postPageDebugMarkers(page)));
+  const dialogDomDebug = await inspectPostDialogDom(page);
+  const dialogText = dialogDomDebug.selectedText || (await visibleDialogText(page));
+  const cleanRawText = await visiblePostDetailText(page);
+  const cleanText = normalizeText(cleanRawText);
+  const dialogLines = normalizeText(dialogText)
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const dialogOwner =
+    dialogLines.find((line) => isNasaHubbleOwner(line)) ??
+    dialogLines.find((line, index) => index > 0 && /^(bai viet cua|post by)$/i.test(foldForUiMatch(dialogLines[index - 1])) && line.length > 2) ??
+    null;
+  const dialogCaptionDebugMarkers: string[] = [];
+  const dialogCaption = extractPostContentFromDialogText(dialogText, dialogOwner, dialogCaptionDebugMarkers);
+  allDebugMarkers.push(...dialogCaptionDebugMarkers);
+  const dialogCaptionLengthMarker = `[facebook-post-dialog-caption-length=${dialogCaption.length}]`;
+  const dialogCaptionMarker = `[facebook-post-dialog-caption=${compactDebugText(dialogCaption, 300)}]`;
+  addDebugMarker(dialogCaptionLengthMarker);
+  addDebugMarker(dialogCaptionMarker);
+  const rawTextCaption = dialogCaption ? "" : extractPostCaptionFromRawText(cleanRawText);
+  const rawTextCaptionMarker = `[facebook-post-rawtext-caption=${compactDebugText(rawTextCaption, 500)}]`;
+  addDebugMarker(rawTextCaptionMarker);
+  if (!dialogCaption && !rawTextCaption) {
+    allDebugMarkers.push(...(await inspectAlternativePostTemplate(page)));
+  }
+  const lines = cleanText.split(/\n+/).map((line) => line.trim()).filter(Boolean);
+  const detectedOwner = dialogOwner ?? lines.find((line) => line.length > 2 && !isNoiseLine(line)) ?? null;
+  const contentBeforeCleanup = dialogCaption || rawTextCaption || extractMainContent(cleanText);
+  const cleanCaptionBeforeMarker = `[facebook-post-clean-caption-before=${compactDebugText(contentBeforeCleanup, 300)}]`;
+  addDebugMarker(cleanCaptionBeforeMarker);
+  const content = cleanNormalPostCaptionForMetadataNoise(contentBeforeCleanup);
+  const cleanCaptionAfterMarker = `[facebook-post-clean-caption-after=${compactDebugText(content, 300)}]`;
+  addDebugMarker(cleanCaptionAfterMarker);
+  const cleanCaptionMarker = `[facebook-post-clean-caption=${compactDebugText(content, 300)}]`;
+  addDebugMarker(cleanCaptionMarker);
+  const contentBeforeCreateMarker = `[facebook-post-content-before-create=${compactDebugText(content, 300)}]`;
+  addDebugMarker(contentBeforeCreateMarker);
+  const post: ParsedPost = {
     postUrl,
     postId: postIdFor(postUrl, content),
     author: detectedOwner,
     content,
     publishedAt: extractPublishedAt(lines),
-    reactionCount: metricValue(text, ["reactions", "reaction", "likes", "like"]),
-    likeCount: metricValue(text, ["likes", "like"]),
-    commentCount: metricValue(text, ["comments", "comment"]),
-    shareCount: metricValue(text, ["shares", "share"]),
-    viewCount: metricValue(text, ["views", "view"]),
-    rawText: text,
-    comments: parseVisibleComments(text, content)
+    reactionCount: metricValue(cleanText, ["reactions", "reaction", "likes", "like"]),
+    likeCount: metricValue(cleanText, ["likes", "like"]),
+    commentCount: metricValue(cleanText, ["comments", "comment"]),
+    shareCount: metricValue(cleanText, ["shares", "share"]),
+    viewCount: metricValue(cleanText, ["views", "view"]),
+    rawText: cleanText,
+    comments: parseVisibleComments(cleanText, content)
   };
+  const contentAfterCreateMarker = `[facebook-post-content-after-create=${compactDebugText(post.content, 300)}]`;
+  addDebugMarker(contentAfterCreateMarker);
+  const finalCaptionMarker = `[facebook-post-final-caption=${compactDebugText(post.content, 300)}]`;
+  addDebugMarker(finalCaptionMarker);
+  const contentBeforeReturnMarker = `[facebook-post-content-before-return=${compactDebugText(post.content, 300)}]`;
+  addDebugMarker(contentBeforeReturnMarker);
+  post.rawText = normalizeText([post.rawText ?? "", allDebugMarkers.join("\n")].filter(Boolean).join("\n"));
+  return post;
 }
 
 async function reelViewerText(page: Page): Promise<string> {
