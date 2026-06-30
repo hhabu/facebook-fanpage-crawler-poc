@@ -3,198 +3,322 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Multi-Bot Crawler MVP</title>
+    <title>Multi-Bot Crawler</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <main class="shell">
-      <header class="topbar">
-        <div>
-          <h1>Multi-Bot Crawler</h1>
-          <p>Manage scraping bots, isolated browser profiles, crawl history, and analysis output.</p>
-        </div>
-        <button id="refreshButton" class="button secondary">Refresh</button>
-      </header>
-
-      <section class="metrics" aria-label="Dashboard metrics">
-        <article>
-          <span>Bots</span>
-          <strong id="botCount">0</strong>
-        </article>
-        <article>
-          <span>Profiles</span>
-          <strong id="profileCount">0</strong>
-        </article>
-        <article>
-          <span>Crawl Results</span>
-          <strong id="resultCount">0</strong>
-        </article>
-      </section>
-
-      <section class="workspace">
-        <div class="panel">
-          <div class="panelHeader">
-            <div>
-              <h2>Bot Manager</h2>
-              <p>Create bots and run them manually.</p>
-            </div>
-          </div>
-
-          <form id="botForm" class="form">
-            <input type="hidden" id="botId" />
-            <label>
-              Name
-              <input id="name" required placeholder="Competitor article bot" />
-            </label>
-            <label>
-              Type
-              <select id="type" required>
-                <option value="article">article</option>
-                <option value="product">product</option>
-                <option value="social">social</option>
-                <option value="custom">custom</option>
-              </select>
-            </label>
-            <label>
-              Target URL
-              <input id="targetUrl" required placeholder="https://example.com/news" />
-            </label>
-            <label>
-              Browser Profile
-              <input id="browserProfile" required placeholder="competitor-news-profile" />
-            </label>
-            <label>
-              Browser Engine
-              <select id="browserEngine">
-                <option value="auto">auto</option>
-                <option value="fetch">fetch</option>
-                <option value="cloak">cloak</option>
-                <option value="playwright">playwright</option>
-              </select>
-            </label>
-            <label>
-              Proxy URL
-              <input id="proxyUrl" placeholder="http://user:pass@host:port" />
-            </label>
-            <label>
-              User Agent
-              <input id="userAgent" placeholder="optional custom UA" />
-            </label>
-            <label>
-              Retry Limit
-              <input id="retryLimit" type="number" min="0" max="5" value="2" />
-            </label>
-            <label>
-              Cooldown Seconds
-              <input id="cooldownSeconds" type="number" min="0" value="60" />
-            </label>
-            <label>
-              Schedule Cron
-              <input id="scheduleCron" placeholder="optional, future scheduler" />
-            </label>
-            <label>
-              Status
-              <select id="status">
-                <option value="active">active</option>
-                <option value="paused">paused</option>
-                <option value="error">error</option>
-              </select>
-            </label>
-            <div class="formActions">
-              <button class="button" type="submit">Save Bot</button>
-              <button id="resetFormButton" class="button secondary" type="button">Clear</button>
-            </div>
-          </form>
-
-          <div id="botList" class="list" aria-live="polite"></div>
-        </div>
-
-        <aside class="panel">
-          <div class="panelHeader">
-            <div>
-              <h2>Browser Profiles</h2>
-              <p>Profile folders are created per bot before a run.</p>
-            </div>
-          </div>
-          <div id="profileList" class="compactList"></div>
-        </aside>
-      </section>
-
-      <section class="mentorGrid">
-        <div class="panel">
-          <div class="panelHeader">
-            <div>
-              <h2>Competitor Social Intake</h2>
-              <p>Paste Facebook, TikTok, or YouTube links to crawl public metrics and analyze content.</p>
-            </div>
-          </div>
-          <form id="socialIntakeForm" class="stackForm">
-            <label>
-              Competitor name
-              <input id="competitorName" placeholder="Competitor A" />
-            </label>
-            <label>
-              Social links
-              <textarea id="socialLinksText" rows="5" placeholder="https://www.facebook.com/...\nhttps://www.tiktok.com/..."></textarea>
-            </label>
-            <label class="checkboxLine">
-              <input id="socialRunNow" type="checkbox" />
-              Run bots after creating
-            </label>
-            <button class="button" type="submit">Import Social Links</button>
-          </form>
-        </div>
-
-        <div class="panel">
-          <div class="panelHeader">
-            <div>
-              <h2>Daily Logistics Monitor</h2>
-              <p>Pull recent public news about logistics, policy, customs, and tax.</p>
-            </div>
-          </div>
-          <form id="researchMonitorForm" class="stackForm">
-            <label>
-              Query
-              <input id="researchQuery" value="Vietnam logistics shipping policy tax customs import export" />
-            </label>
-            <label>
-              Limit
-              <input id="researchLimit" type="number" min="1" max="10" value="5" />
-            </label>
-            <button class="button" type="submit">Run Monitor Now</button>
-          </form>
-        </div>
-
-        <aside class="panel">
-          <div class="panelHeader">
-            <div>
-              <h2>Notifications</h2>
-              <p>New crawl events and bot errors.</p>
-            </div>
-          </div>
-          <div id="notificationList" class="compactList"></div>
-        </aside>
-      </section>
-
-      <section class="panel">
-        <div class="panelHeader">
+    <div class="appShell">
+      <aside class="sidebar" aria-label="Main navigation">
+        <div class="brandBlock">
+          <div class="brandMark">M</div>
           <div>
-            <h2>Crawl Results</h2>
-            <p>History, extracted data, and Social Lens-style analysis detail.</p>
-          </div>
-          <div class="itemActions">
-            <a class="button secondary" href="/api/exports/crawl-results.csv">Export CSV</a>
-            <a class="button secondary" href="/api/exports/crawl-results.json">Export JSON</a>
-            <button id="deleteAllResultsButton" class="button danger" type="button">Delete All</button>
+            <strong>Multi-Bot</strong>
+            <span>Crawler Studio</span>
           </div>
         </div>
-        <div id="runStatus" class="statusLine"></div>
-        <div class="resultsLayout">
-          <div id="resultList" class="list"></div>
-          <div id="resultDetail" class="detailBox">Select a result to inspect details.</div>
+
+        <nav class="navGroup">
+          <span class="navLabel">Workspace</span>
+          <a class="navItem active" href="#overview" data-nav-view="overview">
+            <span class="navIcon">OV</span>
+            <span class="navText">
+              <strong>Overview</strong>
+              <small>Metrics and quick actions</small>
+            </span>
+          </a>
+          <a class="navItem" href="#bots" data-nav-view="bots">
+            <span class="navIcon">BT</span>
+            <span class="navText">
+              <strong>Bots</strong>
+              <small>Create, edit, run crawlers</small>
+            </span>
+          </a>
+          <a class="navItem" href="#profiles" data-nav-view="profiles">
+            <span class="navIcon">PF</span>
+            <span class="navText">
+              <strong>Profiles</strong>
+              <small>Login sessions and folders</small>
+            </span>
+          </a>
+          <a class="navItem" href="#intake" data-nav-view="intake">
+            <span class="navIcon">IN</span>
+            <span class="navText">
+              <strong>Intake</strong>
+              <small>Import links and monitor news</small>
+            </span>
+          </a>
+          <a class="navItem" href="#results" data-nav-view="results">
+            <span class="navIcon">RS</span>
+            <span class="navText">
+              <strong>Results</strong>
+              <small>Inspect crawled data</small>
+            </span>
+          </a>
+        </nav>
+
+        <nav class="navGroup">
+          <span class="navLabel">Exports</span>
+          <a class="navItem" href="/api/exports/crawl-results.csv">
+            <span class="navIcon">CSV</span>
+            <span class="navText">
+              <strong>Export CSV</strong>
+              <small>Spreadsheet download</small>
+            </span>
+          </a>
+          <a class="navItem" href="/api/exports/crawl-results.json">
+            <span class="navIcon">JS</span>
+            <span class="navText">
+              <strong>Export JSON</strong>
+              <small>Raw crawl archive</small>
+            </span>
+          </a>
+        </nav>
+
+        <div class="sidebarFooter">
+          <span class="statusDot"></span>
+          <span>Local crawler API</span>
         </div>
-      </section>
-    </main>
+      </aside>
+
+      <div class="mainColumn">
+        <header class="topbar" id="overview">
+          <div>
+            <span class="eyebrow">Dashboard</span>
+            <h1>Multi-Bot Crawler</h1>
+          </div>
+          <div class="topbarActions">
+            <span id="runStatus" class="statusLine"></span>
+            <button id="refreshButton" class="button secondary" type="button">Refresh</button>
+          </div>
+        </header>
+
+        <main class="content">
+          <section class="viewStack" data-view="overview">
+            <div class="heroPanel">
+              <div>
+                <p class="heroKicker">Scraping operations</p>
+                <h2>Monitor crawler jobs, browser sessions, and extracted research in one workspace.</h2>
+              </div>
+              <div class="metrics" aria-label="Dashboard metrics">
+                <article>
+                  <span>Bots</span>
+                  <strong id="botCount">0</strong>
+                </article>
+                <article>
+                  <span>Profiles</span>
+                  <strong id="profileCount">0</strong>
+                </article>
+                <article>
+                  <span>Crawl Results</span>
+                  <strong id="resultCount">0</strong>
+                </article>
+              </div>
+            </div>
+
+            <div class="overviewGrid">
+              <article class="panel">
+                <div class="panelHeader">
+                  <div>
+                    <span class="sectionLabel">Next action</span>
+                    <h2>Run or create a crawler</h2>
+                    <p>Open the Bots view to manage targets, browser engines, and login sessions.</p>
+                  </div>
+                </div>
+                <div class="quickActions">
+                  <a class="button" href="#bots">Open Bots</a>
+                  <a class="button secondary" href="#results">Inspect Results</a>
+                </div>
+              </article>
+
+              <article class="panel">
+                <div class="panelHeader">
+                  <div>
+                    <span class="sectionLabel">Sessions</span>
+                    <h2>Browser profile health</h2>
+                    <p>Warm-login profiles before crawling sites that require a visible session.</p>
+                  </div>
+                </div>
+                <div class="quickActions">
+                  <a class="button secondary" href="#profiles">View Profiles</a>
+                  <a class="button secondary" href="#intake">Import Links</a>
+                </div>
+              </article>
+            </div>
+          </section>
+
+          <section class="viewStack" data-view="bots" aria-label="Bot management">
+            <div class="panel" id="bots">
+              <div class="panelHeader">
+                <div>
+                  <span class="sectionLabel">Automation</span>
+                  <h2>Bot Manager</h2>
+                  <p>Create bots and run them manually.</p>
+                </div>
+              </div>
+
+              <form id="botForm" class="form">
+                <input type="hidden" id="botId" />
+                <label>
+                  Name
+                  <input id="name" required placeholder="Competitor article bot" />
+                </label>
+                <label>
+                  Type
+                  <select id="type" required>
+                    <option value="article">article</option>
+                    <option value="product">product</option>
+                    <option value="social">social</option>
+                    <option value="custom">custom</option>
+                  </select>
+                </label>
+                <label class="wideField">
+                  Target URL
+                  <input id="targetUrl" required placeholder="https://example.com/news" />
+                </label>
+                <label>
+                  Browser Profile
+                  <input id="browserProfile" required placeholder="competitor-news-profile" />
+                </label>
+                <label>
+                  Browser Engine
+                  <select id="browserEngine">
+                    <option value="auto">auto</option>
+                    <option value="fetch">fetch</option>
+                    <option value="cloak">cloak</option>
+                    <option value="playwright">playwright</option>
+                  </select>
+                </label>
+                <label>
+                  Proxy URL
+                  <input id="proxyUrl" placeholder="http://user:pass@host:port" />
+                </label>
+                <label>
+                  User Agent
+                  <input id="userAgent" placeholder="optional custom UA" />
+                </label>
+                <label>
+                  Retry Limit
+                  <input id="retryLimit" type="number" min="0" max="5" value="2" />
+                </label>
+                <label>
+                  Cooldown Seconds
+                  <input id="cooldownSeconds" type="number" min="0" value="60" />
+                </label>
+                <label>
+                  Schedule Cron
+                  <input id="scheduleCron" placeholder="optional, future scheduler" />
+                </label>
+                <label>
+                  Status
+                  <select id="status">
+                    <option value="active">active</option>
+                    <option value="paused">paused</option>
+                    <option value="error">error</option>
+                  </select>
+                </label>
+                <div class="formActions">
+                  <button class="button" type="submit">Save Bot</button>
+                  <button id="resetFormButton" class="button secondary" type="button">Clear</button>
+                </div>
+              </form>
+
+              <div id="botList" class="list" aria-live="polite"></div>
+            </div>
+          </section>
+
+          <section class="viewStack" data-view="profiles">
+            <aside class="panel" id="profiles">
+              <div class="panelHeader">
+                <div>
+                  <span class="sectionLabel">Sessions</span>
+                  <h2>Browser Profiles</h2>
+                  <p>Profile folders are created per bot before a run.</p>
+                </div>
+              </div>
+              <div id="profileList" class="compactList"></div>
+            </aside>
+          </section>
+
+          <section class="mentorGrid viewStack" data-view="intake" id="mentor" aria-label="Intake tools">
+            <div class="panel">
+              <div class="panelHeader">
+                <div>
+                  <span class="sectionLabel">Social Lens</span>
+                  <h2>Competitor Social Intake</h2>
+                  <p>Paste Facebook, TikTok, or YouTube links to crawl public metrics.</p>
+                </div>
+              </div>
+              <form id="socialIntakeForm" class="stackForm">
+                <label>
+                  Competitor name
+                  <input id="competitorName" placeholder="Competitor A" />
+                </label>
+                <label>
+                  Social links
+                  <textarea id="socialLinksText" rows="5" placeholder="https://www.facebook.com/...\nhttps://www.tiktok.com/..."></textarea>
+                </label>
+                <label class="checkboxLine">
+                  <input id="socialRunNow" type="checkbox" />
+                  Run bots after creating
+                </label>
+                <button class="button" type="submit">Import Social Links</button>
+              </form>
+            </div>
+
+            <div class="panel">
+              <div class="panelHeader">
+                <div>
+                  <span class="sectionLabel">Research</span>
+                  <h2>Daily Logistics Monitor</h2>
+                  <p>Pull recent public news about logistics, policy, customs, and tax.</p>
+                </div>
+              </div>
+              <form id="researchMonitorForm" class="stackForm">
+                <label>
+                  Query
+                  <input id="researchQuery" value="Vietnam logistics shipping policy tax customs import export" />
+                </label>
+                <label>
+                  Limit
+                  <input id="researchLimit" type="number" min="1" max="10" value="5" />
+                </label>
+                <button class="button" type="submit">Run Monitor Now</button>
+              </form>
+            </div>
+
+            <aside class="panel">
+              <div class="panelHeader">
+                <div>
+                  <span class="sectionLabel">Events</span>
+                  <h2>Notifications</h2>
+                  <p>New crawl events and bot errors.</p>
+                </div>
+              </div>
+              <div id="notificationList" class="compactList"></div>
+            </aside>
+          </section>
+
+          <section class="panel resultsPanel viewStack" data-view="results" id="results">
+            <div class="panelHeader">
+              <div>
+                <span class="sectionLabel">Archive</span>
+                <h2>Crawl Results</h2>
+                <p>History, extracted data, and Social Lens-style analysis detail.</p>
+              </div>
+              <div class="itemActions">
+                <a class="button secondary" href="/api/exports/crawl-results.csv">Export CSV</a>
+                <a class="button secondary" href="/api/exports/crawl-results.json">Export JSON</a>
+                <button id="deleteAllResultsButton" class="button danger" type="button">Delete All</button>
+              </div>
+            </div>
+            <div class="resultsLayout">
+              <div id="resultList" class="list"></div>
+              <div id="resultDetail" class="detailBox">Select a result to inspect details.</div>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
 
     <script src="/app.js"></script>
   </body>

@@ -815,7 +815,7 @@ function encodeCommentMetadata(comments: ParsedPost["comments"]): string {
 }
 
 function encodePostMetadata(post: { author: string | null; content: string }): string {
-  return `[facebook-post-json=${Buffer.from(JSON.stringify(post), "utf8").toString("base64")}]`;
+  return `[facebook-post-json=${Buffer.from(JSON.stringify({ ...post, content: cleanNormalPostCaptionForMetadataNoise(post.content) }), "utf8").toString("base64")}]`;
 }
 
 function postMetadataFromSnapshot(text: string): { author: string | null; content: string } | null {
@@ -832,6 +832,14 @@ function postMetadataFromSnapshot(text: string): { author: string | null; conten
   } catch {
     return null;
   }
+}
+
+function parsedPostMetadataCaption(post: ParsedPost): string | null {
+  const content = cleanNormalPostCaptionForMetadataNoise(postMetadataFromSnapshot(post.rawText ?? "")?.content ?? "");
+  if (!content || content === POST_CONTENT_UNAVAILABLE || content.startsWith("[facebook-")) {
+    return null;
+  }
+  return content;
 }
 
 function commentsFromSnapshotMetadata(text: string): ParsedPost["comments"] {
@@ -883,6 +891,137 @@ function filterCommentsForPost(comments: ParsedPost["comments"], postBody: strin
   return comments.filter((comment) => !shouldSkipCommentCandidate(comment.authorName ?? undefined, comment.content, postBody));
 }
 
+function isNormalPostCommentUiOnlyLine(value: string): boolean {
+  const line = normalizeText(value);
+  const folded = foldForUiMatch(line).replace(/:$/, "");
+  const bareFolded = folded.replace(/^(?:[·•|.]+|…)\s*/, "");
+  return (
+    !line ||
+    isCommentUiLine(line) ||
+    isCommentMetricLine(line) ||
+    isFacebookLoginOrQrText(line) ||
+    /^theo doi$/.test(folded) ||
+    /^bai viet cua\b/.test(folded) ||
+    /^post by\b/.test(folded) ||
+    /^xem ban goc\b/.test(bareFolded) ||
+    /^see original\b/.test(folded) ||
+    /^xem ban dich\b/.test(bareFolded) ||
+    /^see translation\b/.test(folded) ||
+    /^xem \d+ phan hoi\b/.test(folded) ||
+    /^xem tat ca .* phan hoi\b/.test(folded) ||
+    /^view .* repl/.test(folded) ||
+    /^xep hang ban dich nay\b/.test(bareFolded) ||
+    /^rate this translation\b/.test(folded) ||
+    /^viet binh luan/.test(folded) ||
+    /^phu hop nhat$/.test(folded) ||
+    /^xem them\b/.test(bareFolded) ||
+    /^see more\b/.test(bareFolded)
+  );
+}
+
+function isNormalPostCommentMetricOnlyLine(value: string): boolean {
+  const folded = foldForUiMatch(value).trim();
+  return (
+    isCommentMetricLine(value) ||
+    /^\d+(?:,\d+)?[kKmM]?\s*(?:luot chia se|shares?)$/.test(folded) ||
+    /^\d+(?:,\d+)?[kKmM]?\s*(?:binh luan|comments?)$/.test(folded)
+  );
+}
+
+function isNormalPostCommentTimestampLine(value: string): boolean {
+  const folded = foldForUiMatch(value).trim();
+  return isTimestampLine(value) || /^\d+\s*(phut|gio|ngay|tuan|thang|nam)$/.test(folded) || /^vua xong$/.test(folded);
+}
+
+function cleanNormalPostCommentText(value: string | null | undefined, postBody?: string): string {
+  const lines = normalizeText(value ?? "")
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const firstFolded = foldForUiMatch(lines[0] ?? "");
+  if (/\b(?:xem them|see more)\b/.test(firstFolded)) {
+    return "";
+  }
+  const startsWithUiOrMetric =
+    lines.length > 0 && (isNormalPostCommentUiOnlyLine(lines[0]) || isNormalPostCommentMetricOnlyLine(lines[0]));
+  const cleaned: string[] = [];
+
+  for (const line of lines) {
+    if (
+      isNormalPostCommentUiOnlyLine(line) ||
+      isNormalPostCommentMetricOnlyLine(line) ||
+      textContainsNasaHubbleOwner(line) ||
+      contentAppearsInPostBody(line, postBody)
+    ) {
+      continue;
+    }
+    if (cleaned.length && normalizedComparableText(cleaned[cleaned.length - 1]) === normalizedComparableText(line)) {
+      continue;
+    }
+    cleaned.push(line);
+  }
+
+  if (startsWithUiOrMetric && cleaned.length === 1 && isLikelyUserNameLine(cleaned[0])) {
+    return "";
+  }
+
+  return normalizeText(cleaned.join("\n"));
+}
+
+export function cleanNormalPostCommentForStorage(
+  comment: Omit<SocialCommentSnapshot, "id" | "socialPostId" | "createdAt">,
+  postBody?: string
+): Omit<SocialCommentSnapshot, "id" | "socialPostId" | "createdAt"> | null {
+  const authorName = cleanNormalPostCommentText(comment.authorName, postBody);
+  let content = cleanNormalPostCommentText(comment.content, postBody);
+  let createdAtText = normalizeText(comment.createdAtText ?? "");
+
+  const contentLines = content.split(/\n+/).map((line) => line.trim()).filter(Boolean);
+  const nonTimestampContent = contentLines.filter((line) => {
+    if (isNormalPostCommentTimestampLine(line)) {
+      createdAtText = createdAtText || line;
+      return false;
+    }
+    if (normalizedComparableText(line) === normalizedComparableText(authorName)) {
+      return false;
+    }
+    return true;
+  });
+  content = normalizeText(nonTimestampContent.join("\n"));
+
+  if (!authorName || !content || shouldSkipCommentCandidate(authorName, content, postBody)) {
+    return null;
+  }
+
+  return {
+    ...comment,
+    authorName,
+    content,
+    createdAtText: createdAtText || null
+  };
+}
+
+function cleanNormalPostComments(
+  comments: ParsedPost["comments"],
+  postBody?: string
+): ParsedPost["comments"] {
+  const cleaned: ParsedPost["comments"] = [];
+  const seen = new Set<string>();
+  for (const comment of comments) {
+    const next = cleanNormalPostCommentForStorage(comment, postBody);
+    if (!next) {
+      continue;
+    }
+    const key = `${next.authorName}:${next.content}:${next.createdAtText ?? ""}`.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    cleaned.push(next);
+  }
+  return cleaned;
+}
+
 function isLikelyUserNameLine(value: string): boolean {
   const line = value.trim();
   return line.length >= 2 && line.length <= 80 && !/[.!?:/\\]/.test(line) && line.split(/\s+/).length <= 6;
@@ -915,6 +1054,12 @@ function appendPostContentOverwriteDebug(post: ParsedPost, functionName: string,
 
 function sanitizePostContent(post: ParsedPost, sourceUrl?: string | null): void {
   const content = normalizeText(post.content);
+  const parsedCaption = !isFacebookReelUrl(post.postUrl) ? parsedPostMetadataCaption(post) : null;
+  if (parsedCaption) {
+    appendPostContentOverwriteDebug(post, "sanitizePostContent:preserve-parsed-normal-caption", parsedCaption);
+    post.content = parsedCaption;
+    return;
+  }
   const owner = post.author ? normalizedComparableText(post.author) : null;
   if (isFacebookReelUrl(post.postUrl) && isNasaHubbleOwner(post.author) && content.length > 20) {
     appendPostContentOverwriteDebug(post, "sanitizePostContent:preserve-reel", content);
@@ -1047,7 +1192,7 @@ async function collectVisibleCommentsFromDialog(page: Page, postBody?: string): 
     })
     .catch(() => []);
 
-  return commentsFromDomItems(items, postBody);
+  return cleanNormalPostComments(commentsFromDomItems(items, postBody), postBody);
 }
 
 async function expandFeedCaptions(page: Page): Promise<void> {
@@ -1168,7 +1313,7 @@ function parseVisibleComments(rawText: string, postBody?: string): ParsedPost["c
     }
   }
 
-  return comments.slice(0, MAX_COMMENTS_PER_POST);
+  return cleanNormalPostComments(comments.slice(0, MAX_COMMENTS_PER_POST), bodyText);
 }
 
 function hasCommentMetric(text: string): boolean {
@@ -1773,10 +1918,11 @@ function postsFromExpandedSnapshots(snapshots: string[], targetUrl: string, limi
     const text = normalizeText(snapshot);
     const primaryText = primaryArticleTextFromSnapshot(snapshot);
     const postMeta = postMetadataFromSnapshot(text);
+    const postMetaContent = postMeta?.content ? cleanNormalPostCaptionForMetadataNoise(postMeta.content) : null;
     const fallbackPostText = !isCommentLikeArticleText(primaryText) ? extractMainContent(primaryText) : "";
     const postText =
-      postMeta?.content && postMeta.content !== POST_CONTENT_UNAVAILABLE
-        ? postMeta.content
+      postMetaContent && postMetaContent !== POST_CONTENT_UNAVAILABLE
+        ? postMetaContent
         : fallbackPostText && !fallbackPostText.startsWith("[facebook-crawler") && fallbackPostText.length >= 20
           ? fallbackPostText
           : POST_CONTENT_UNAVAILABLE;
@@ -2002,7 +2148,22 @@ function cleanNormalPostCaption(content: string): string {
   return mostlySingleCharacterMetadata ? normalizeText(normalized.slice(separatorIndex + separator.length)) : normalized;
 }
 
-function cleanNormalPostCaptionForMetadataNoise(content: string): string {
+function stripNormalPostUiTail(content: string): string {
+  let cleaned = normalizeText(content);
+  const uiBoundary =
+    /\s*(?:[·|]\s*)?(?:Xem thêm|See more|Xem bản gốc|See original|Xem bản dịch|See translation|Xếp hạng bản dịch này|Rate this translation|Tất cả cảm xúc:|All reactions:|Thích|Bình luận|Chia sẻ|Phù hợp nhất)\b[\s\S]*$/i;
+  cleaned = normalizeText(cleaned.replace(uiBoundary, ""));
+  cleaned = normalizeText(
+    cleaned
+      .replace(/\s+\d[\d.,]*[KkMm]?\s+\d[\d.,]*[KkMm]?\s+\d[\d.,]*[KkMm]?\s*$/i, "")
+      .replace(/\s+\d[\d.,]*[KkMm]?\s+(?:bình luận|comments?)\s*$/i, "")
+      .replace(/\s+\d[\d.,]*[KkMm]?\s+(?:lượt\s+chia\s+sẻ|shares?)\s*$/i, "")
+      .replace(/\s*(?:\.?\s*…+|\.?\s*\.\.\.)\s*$/u, ".")
+  );
+  return cleaned;
+}
+
+export function cleanNormalPostCaptionForMetadataNoise(content: string): string {
   let cleaned = normalizeText(content);
   const isolatedTokenPattern = /^[A-Za-z0-9À-ỹ]$/;
   const mostlyIsolatedTokens = (value: string) => {
@@ -2013,11 +2174,26 @@ function cleanNormalPostCaptionForMetadataNoise(content: string): string {
     const isolated = tokens.filter((token) => isolatedTokenPattern.test(token)).length;
     return isolated / tokens.length >= 0.6;
   };
+  const hasLongIsolatedTokenRun = (value: string) => {
+    let run = 0;
+    for (const token of value.split(/\s+/).filter(Boolean)) {
+      run = isolatedTokenPattern.test(token) ? run + 1 : 0;
+      if (run >= 8) {
+        return true;
+      }
+    }
+    return false;
+  };
+  const hasScrambledMetadataPrefix = (value: string) => {
+    const tokens = value.split(/\s+/).filter(Boolean);
+    const isolated = tokens.filter((token) => isolatedTokenPattern.test(token)).length;
+    return isolated >= 12 && isolated / tokens.length >= 0.55;
+  };
 
   const separatorMatch = cleaned.match(/\s*(?:Â·|·)\s*/);
   if (separatorMatch?.index !== undefined) {
     const prefix = cleaned.slice(0, separatorMatch.index).trim();
-    if (mostlyIsolatedTokens(prefix)) {
+    if (mostlyIsolatedTokens(prefix) || hasLongIsolatedTokenRun(prefix) || hasScrambledMetadataPrefix(prefix)) {
       cleaned = normalizeText(cleaned.slice(separatorMatch.index + separatorMatch[0].length));
     }
   }
@@ -2030,7 +2206,7 @@ function cleanNormalPostCaptionForMetadataNoise(content: string): string {
     cleaned = normalizeText(cleaned.slice(knownStartMatch.index));
   }
 
-  return cleaned;
+  return stripNormalPostUiTail(cleaned);
 }
 
 function trailingMetricNumbers(text: string): number[] {
@@ -2353,10 +2529,15 @@ async function parsePostPage(page: Page, postUrl: string): Promise<ParsedPost> {
   }
   const lines = cleanText.split(/\n+/).map((line) => line.trim()).filter(Boolean);
   const detectedOwner = dialogOwner ?? lines.find((line) => line.length > 2 && !isNoiseLine(line)) ?? null;
-  const contentBeforeCleanup = dialogCaption || rawTextCaption || extractMainContent(cleanText);
+  const mainContent = extractMainContent(cleanText);
+  const contentCandidates = [dialogCaption, rawTextCaption, mainContent]
+    .map((candidate) => cleanNormalPostCaptionForMetadataNoise(candidate))
+    .map((candidate) => normalizeText(candidate))
+    .filter((candidate) => candidate && candidate !== POST_CONTENT_UNAVAILABLE && !candidate.startsWith("[facebook-"));
+  const contentBeforeCleanup = contentCandidates[0] ?? (dialogCaption || rawTextCaption || mainContent);
   const cleanCaptionBeforeMarker = `[facebook-post-clean-caption-before=${compactDebugText(contentBeforeCleanup, 300)}]`;
   addDebugMarker(cleanCaptionBeforeMarker);
-  const content = cleanNormalPostCaptionForMetadataNoise(contentBeforeCleanup);
+  const content = contentCandidates[0] ?? POST_CONTENT_UNAVAILABLE;
   const cleanCaptionAfterMarker = `[facebook-post-clean-caption-after=${compactDebugText(content, 300)}]`;
   addDebugMarker(cleanCaptionAfterMarker);
   const cleanCaptionMarker = `[facebook-post-clean-caption=${compactDebugText(content, 300)}]`;
@@ -2383,7 +2564,7 @@ async function parsePostPage(page: Page, postUrl: string): Promise<ParsedPost> {
   addDebugMarker(finalCaptionMarker);
   const contentBeforeReturnMarker = `[facebook-post-content-before-return=${compactDebugText(post.content, 300)}]`;
   addDebugMarker(contentBeforeReturnMarker);
-  post.rawText = normalizeText([post.rawText ?? "", allDebugMarkers.join("\n")].filter(Boolean).join("\n"));
+  post.rawText = normalizeText([post.rawText ?? "", encodePostMetadata({ author: post.author, content: post.content }), allDebugMarkers.join("\n")].filter(Boolean).join("\n"));
   return post;
 }
 
@@ -3483,6 +3664,52 @@ function summarizeSocial(
   };
 }
 
+export function cleanRenderedTextPreview(rawText: string): string {
+  return normalizeText(rawText)
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !/^\[facebook-[^\]]+\]$/i.test(line))
+    .filter((line) => !/^---\s*FACEBOOK ROUTED POST\s*---$/i.test(line))
+    .filter((line) => !/^---\s*EXPANDED POST\s*---$/i.test(line))
+    .join("\n");
+}
+
+function cleanFacebookRenderedTextFromPosts(posts: ParsedPost[]): string {
+  const sections = posts
+    .map((post, index) => {
+      const likes = post.likeCount ?? post.reactionCount;
+      const metrics = [
+        likes !== null ? `Likes: ${likes}` : "",
+        post.commentCount !== null ? `Comments: ${post.commentCount}` : "",
+        post.shareCount !== null ? `Shares: ${post.shareCount}` : "",
+        post.viewCount !== null ? `Views: ${post.viewCount}` : ""
+      ].filter(Boolean);
+      const comments = post.comments
+        .map((comment) =>
+          normalizeText(
+            [comment.authorName ? `${comment.authorName}:` : "", comment.content, comment.createdAtText ? `(${comment.createdAtText})` : ""]
+              .filter(Boolean)
+              .join(" ")
+          )
+        )
+        .filter(Boolean);
+
+      return [
+        `Post #${index + 1}`,
+        post.postUrl ? `URL: ${post.postUrl}` : "",
+        post.content && post.content !== POST_CONTENT_UNAVAILABLE ? post.content : "",
+        metrics.length ? metrics.join(" | ") : "",
+        comments.length ? ["Visible comments:", ...comments].join("\n") : ""
+      ]
+        .filter(Boolean)
+        .join("\n");
+    })
+    .filter(Boolean);
+
+  return cleanRenderedTextPreview(sections.join("\n\n"));
+}
+
 async function parseCollectedFacebookPostUrl(page: Page, collectedUrl: CollectedFacebookPostUrl): Promise<ParsedPost | null> {
   const normalizedPostUrl = normalizeFacebookPostDetailUrl(collectedUrl.cleanUrl);
   if (!normalizedPostUrl) {
@@ -3534,7 +3761,7 @@ export async function crawlFacebookPage(bot: Bot, maxPosts = 5): Promise<Faceboo
       return {
         rendered: {
           title: title || "Facebook login required",
-          rawText: normalizeText(`[facebook-login-wall]\n${rawText}`),
+          rawText: cleanRenderedTextPreview(`[facebook-login-wall]\n${rawText}`),
           rawHtml,
           screenshotPath: fs.existsSync(imagePath) ? imagePath : null,
           httpStatus,
@@ -3559,7 +3786,7 @@ export async function crawlFacebookPage(bot: Bot, maxPosts = 5): Promise<Faceboo
       return {
         rendered: {
           title: title || "Facebook reel crawl",
-          rawText: normalizeText(rawText),
+          rawText: cleanFacebookRenderedTextFromPosts(posts) || cleanRenderedTextPreview(rawText),
           rawHtml,
           screenshotPath: fs.existsSync(imagePath) ? imagePath : null,
           httpStatus,
@@ -3601,7 +3828,7 @@ export async function crawlFacebookPage(bot: Bot, maxPosts = 5): Promise<Faceboo
       return {
         rendered: {
           title: title || "Facebook social crawl",
-          rawText,
+          rawText: cleanFacebookRenderedTextFromPosts(posts) || cleanRenderedTextPreview(rawText),
           rawHtml,
           screenshotPath: fs.existsSync(imagePath) ? imagePath : null,
           httpStatus,
@@ -3647,7 +3874,7 @@ export async function crawlFacebookPage(bot: Bot, maxPosts = 5): Promise<Faceboo
     return {
       rendered: {
         title: title || "Facebook social crawl",
-        rawText: normalizeText(rawText),
+        rawText: cleanFacebookRenderedTextFromPosts(posts) || cleanRenderedTextPreview(rawText),
         rawHtml,
         screenshotPath: fs.existsSync(imagePath) ? imagePath : null,
         httpStatus,

@@ -21,8 +21,49 @@ const els = {
   notificationList: document.querySelector("#notificationList"),
   refreshButton: document.querySelector("#refreshButton"),
   deleteAllResultsButton: document.querySelector("#deleteAllResultsButton"),
-  resetFormButton: document.querySelector("#resetFormButton")
+  resetFormButton: document.querySelector("#resetFormButton"),
+  navItems: Array.from(document.querySelectorAll("[data-nav-view]")),
+  views: Array.from(document.querySelectorAll("[data-view]")),
+  pageEyebrow: document.querySelector(".eyebrow"),
+  pageTitle: document.querySelector(".topbar h1")
 };
+
+const viewMeta = {
+  overview: { eyebrow: "Dashboard", title: "Multi-Bot Crawler" },
+  bots: { eyebrow: "Automation", title: "Bots" },
+  profiles: { eyebrow: "Sessions", title: "Browser Profiles" },
+  intake: { eyebrow: "Social Lens", title: "Intake" },
+  results: { eyebrow: "Archive", title: "Crawl Results" }
+};
+
+function currentView() {
+  const hash = window.location.hash.replace("#", "");
+  return viewMeta[hash] ? hash : "overview";
+}
+
+function setView(view, options = {}) {
+  const nextView = viewMeta[view] ? view : "overview";
+  els.views.forEach((item) => {
+    item.hidden = item.dataset.view !== nextView;
+  });
+  els.navItems.forEach((item) => {
+    item.classList.toggle("active", item.dataset.navView === nextView);
+  });
+  els.pageEyebrow.textContent = viewMeta[nextView].eyebrow;
+  els.pageTitle.textContent = viewMeta[nextView].title;
+
+  if (window.location.hash !== `#${nextView}`) {
+    if (options.replace) {
+      history.replaceState(null, "", `#${nextView}`);
+    } else {
+      window.location.hash = nextView;
+    }
+  }
+}
+
+function openView(view) {
+  setView(view);
+}
 
 function formValue(id) {
   return document.querySelector(`#${id}`).value.trim();
@@ -475,6 +516,7 @@ async function saveBot(event) {
 }
 
 function fillForm(bot) {
+  openView("bots");
   document.querySelector("#botId").value = bot.id;
   document.querySelector("#name").value = bot.name;
   document.querySelector("#type").value = bot.type;
@@ -487,7 +529,7 @@ function fillForm(bot) {
   document.querySelector("#cooldownSeconds").value = bot.cooldownSeconds ?? 60;
   document.querySelector("#scheduleCron").value = bot.scheduleCron || "";
   document.querySelector("#status").value = bot.status;
-  window.scrollTo({ top: 0, behavior: "smooth" });
+  document.querySelector("#bots")?.scrollIntoView({ block: "start", behavior: "smooth" });
 }
 
 async function runBot(id) {
@@ -505,6 +547,7 @@ async function runBot(id) {
 }
 
 async function warmProfile(id) {
+  openView("results");
   els.runStatus.textContent = `Opening warm-up browser for bot #${id}...`;
   const response = await api(`/api/browser-profiles/warm/${id}`, {
     method: "POST",
@@ -517,6 +560,7 @@ async function warmProfile(id) {
 }
 
 async function saveSession(id) {
+  openView("results");
   const response = await api(`/api/browser-profiles/warm/${id}/close`, { method: "POST" });
   els.runStatus.textContent = `Session saved for bot #${id}. Run the bot again.`;
   els.resultDetail.innerHTML = `<div class="detailCard"><h3>Session Saved</h3><div class="rawBlock">${escapeHtml(JSON.stringify(response, null, 2))}</div></div>`;
@@ -524,6 +568,7 @@ async function saveSession(id) {
 }
 
 async function inspectResult(id) {
+  openView("results");
   const detail = await api(`/api/crawl-results/${id}`);
   state.selectedResultId = id;
   els.resultDetail.innerHTML = renderResultDetail(detail);
@@ -599,6 +644,7 @@ els.researchMonitorForm.addEventListener("submit", runResearchMonitor);
 els.refreshButton.addEventListener("click", refresh);
 els.deleteAllResultsButton.addEventListener("click", deleteAllResults);
 els.resetFormButton.addEventListener("click", resetForm);
+window.addEventListener("hashchange", () => setView(currentView(), { replace: true }));
 
 document.addEventListener("click", async (event) => {
   const target = event.target;
@@ -647,6 +693,8 @@ document.addEventListener("click", async (event) => {
   }
 
 });
+
+setView(currentView(), { replace: true });
 
 refresh().catch((error) => {
   els.runStatus.textContent = error.message;
